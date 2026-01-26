@@ -1,0 +1,13 @@
+# Secrets - NEVER COMMIT
+.streamlit/secrets.toml
+secrets.toml
+*.env
+*.env.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local cache
+historical_cache.json
