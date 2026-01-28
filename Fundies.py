@@ -743,6 +743,8 @@ def main():
             del st.session_state['ercot_popup_date']
         if 'pjm_popup_date' in st.session_state and 'pjm_dialog_active' not in st.session_state:
             del st.session_state['pjm_popup_date']
+        if 'wind_region_popup_date' in st.session_state and 'wind_region_dialog_active' not in st.session_state:
+            del st.session_state['wind_region_popup_date']
         
         with tab1:
             st.caption(f"Data last fetched: {met_fetch_time} | Next refresh: {next_refresh_time}")
@@ -933,9 +935,8 @@ def main():
                                 st.markdown("<div style='text-align: center; padding: 5px 3px; font-size: 12px;'>N/A</div>", unsafe_allow_html=True)
                 st.markdown("---")
 
-                # Regional Wind Dropdown
+                # Regional Wind with Date Buttons
                 if wind_regional_df is not None and not wind_regional_df.empty:
-                    st.markdown("---")
                     st.markdown("### Wind Forecast by Region")
 
                     # These are the actual column names from the API
@@ -953,99 +954,121 @@ def main():
 
                     # Check which columns actually exist
                     available_regions = {k: v for k, v in region_mapping.items() if v in wind_regional_df.columns}
-
-                    # DEBUG: Show what columns we found
-                    st.sidebar.info(f"Available wind columns: {list(wind_regional_df.columns)}")
-                    st.sidebar.success(f"Mapped regions: {list(available_regions.keys())}")
+                    
+                    # Store mapping in session state for dialog
+                    st.session_state['wind_region_mapping'] = available_regions
 
                     if available_regions:
-                        selected_region = st.selectbox(
-                            "Select Region:",
-                            ['None'] + list(available_regions.keys()),
-                            key="wind_region_select"
-                        )
-
-                        if selected_region != 'None':
-                            st.session_state['wind_region_popup'] = selected_region
-                            st.session_state['wind_region_mapping'] = available_regions
-                    else:
-                        st.warning("No regional wind columns found in data")
+                        wind_regional_dates = sorted(wind_regional_df['deliveryDate'].unique())[:7]
+                        
+                        # Calculate OnPk averages for display boxes
+                        regional_onpk_totals = []
+                        for date in wind_regional_dates:
+                            date_data = wind_regional_df[wind_regional_df['deliveryDate'] == date]
+                            onpeak_data = date_data[(date_data['HE'] >= 7) & (date_data['HE'] <= 22)]
+                            total = sum(onpeak_data[col].mean() for col in available_regions.values() if col in onpeak_data.columns and not onpeak_data[col].isna().all())
+                            regional_onpk_totals.append(total)
+                        
+                        regional_min = min(regional_onpk_totals) if regional_onpk_totals else 0
+                        regional_max = max(regional_onpk_totals) if regional_onpk_totals else 1
+                        
+                        # Day of week row
+                        st.markdown("<div style='display: flex; justify-content: space-around; margin-bottom: 5px;'>" +
+                                    "".join([f"<div style='text-align: center; flex: 1; font-size: 11px; color: #888888;'>{pd.to_datetime(d).strftime('%a')}</div>" for d in wind_regional_dates]) +
+                                    "</div>", unsafe_allow_html=True)
+                        
+                        # Date buttons and value boxes
+                        cols = st.columns(7)
+                        for idx, date in enumerate(wind_regional_dates):
+                            date_obj = pd.to_datetime(date)
+                            total_wind = regional_onpk_totals[idx]
+                            wind_color = get_color_for_value(total_wind, regional_min, regional_max, reverse=True)
+                            with cols[idx]:
+                                if st.button(f" {date_obj.strftime('%m/%d')}", key=f"wind_region_{date}", use_container_width=True):
+                                    st.session_state['wind_region_popup_date'] = date
+                                    st.session_state['wind_region_dialog_active'] = True
+                                st.markdown(f"""
+                                    <div style='text-align: center; padding: 10px 3px; background-color: {wind_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
+                                        <div style='font-size: 12px; font-weight: bold; margin-bottom: 4px; color: #000000;'>Total</div>
+                                        <div style='font-size: 16px; font-weight: bold; color: #000000;'>{total_wind:,.0f}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
 
                 # Regional Wind Popup
-                if 'wind_region_popup' in st.session_state and 'wind_region_mapping' in st.session_state:
-                    @st.dialog(f"Wind Forecast - {st.session_state['wind_region_popup']}", width="large")
+                if 'wind_region_popup_date' in st.session_state and 'wind_region_mapping' in st.session_state:
+                    @st.dialog("Regional Wind Forecast", width="large")
                     def show_wind_region_dialog():
-                        region = st.session_state['wind_region_popup']
-                        region_mapping = st.session_state['wind_region_mapping']
-                        column_name = region_mapping[region]
-
-                        # Get 7 days of forecast data
-                        forecast_dates = sorted(wind_regional_df['deliveryDate'].unique())[:7]
-
-                        if not forecast_dates:
-                            st.warning("No forecast data available for this region")
-                            if st.button("Close", key="close_wind_region", type="primary"):
-                                del st.session_state['wind_region_popup']
-                                del st.session_state['wind_region_mapping']
+                        popup_date = st.session_state['wind_region_popup_date']
+                        available_regions = st.session_state['wind_region_mapping']
+                        date_obj = pd.to_datetime(popup_date)
+                        st.markdown(f"#### {date_obj.strftime('%A, %B %d, %Y')}")
+                        
+                        date_data = wind_regional_df[wind_regional_df['deliveryDate'] == popup_date].sort_values('HE')
+                        
+                        if date_data.empty:
+                            st.warning("No data available for this date")
+                            if st.button("Close", key="close_wind_region", type="primary", use_container_width=True):
+                                if 'wind_region_dialog_active' in st.session_state:
+                                    del st.session_state['wind_region_dialog_active']
+                                del st.session_state['wind_region_popup_date']
                                 st.rerun()
                             return
-
-                        # Calculate min/max for color gradient
-                        all_values = []
-                        for date in forecast_dates:
-                            date_data = wind_regional_df[wind_regional_df['deliveryDate'] == date]
-                            if not date_data.empty and column_name in date_data.columns:
-                                all_values.extend(date_data[column_name].dropna().tolist())
-
-                        region_min = min(all_values) if all_values else 0
-                        region_max = max(all_values) if all_values else 1
-
-                        # Create 7 columns for 7 days
-                        date_cols = st.columns(7)
-
-                        for col_idx, date in enumerate(forecast_dates):
-                            date_obj = pd.to_datetime(date)
-                            date_data = wind_regional_df[wind_regional_df['deliveryDate'] == date].sort_values('HE')
-
-                            with date_cols[col_idx]:
-                                # Date header
-                                st.markdown(f"**{date_obj.strftime('%m/%d')}**")
-
-                                if not date_data.empty and column_name in date_data.columns:
-                                    # Calculate OnPk Avg (HE 7-22)
-                                    onpeak_data = date_data[(date_data['HE'] >= 7) & (date_data['HE'] <= 22)]
-                                    onpk_avg = onpeak_data[column_name].mean() if not onpeak_data.empty else 0
-
-                                    # Display OnPk Avg at top
-                                    st.markdown(f"""
-                                        <div style='background-color: #444; padding: 5px; border-radius: 4px; text-align: center; margin-bottom: 5px;'>
-                                            <div style='font-size: 10px; color: #888;'>OnPk Avg</div>
-                                            <div style='font-size: 14px; font-weight: bold;'>{onpk_avg:,.0f}</div>
-                                        </div>
-                                    """, unsafe_allow_html=True)
-
-                                    # Display all 24 hours
-                                    for idx, row in date_data.iterrows():
-                                        he = int(row['HE'])
-                                        wind_val = row[column_name]
-
-                                        if pd.notna(wind_val):
-                                            wind_color = get_color_for_value(wind_val, region_min, region_max, reverse=True)
-
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 2px;'>
-                                                    <div style='width: 20px; text-align: center; font-size: 10px; font-weight: bold; margin-right: 3px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: {wind_color}; color: #000000; padding: 4px; border-radius: 4px; text-align: center;'>
-                                                        <div style='font-size: 11px; font-weight: bold;'>{wind_val:,.0f}</div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
+                        
+                        # Calculate min/max for each region for color scaling
+                        region_mins = {}
+                        region_maxs = {}
+                        for region_name, col_name in available_regions.items():
+                            if col_name in date_data.columns:
+                                vals = date_data[col_name].dropna()
+                                region_mins[region_name] = vals.min() if len(vals) > 0 else 0
+                                region_maxs[region_name] = vals.max() if len(vals) > 0 else 1
+                        
+                        # Build header row
+                        region_names = list(available_regions.keys())
+                        num_regions = len(region_names)
+                        header_cols = "40px " + " ".join(["1fr"] * num_regions)
+                        
+                        header_html = f"<div style='display: grid; grid-template-columns: {header_cols}; gap: 4px; margin-bottom: 4px; font-size: 10px; font-weight: bold; color: #888;'>"
+                        header_html += "<div style='text-align: center;'>HE</div>"
+                        for region in region_names:
+                            header_html += f"<div style='text-align: center;'>{region}</div>"
+                        header_html += "</div>"
+                        st.markdown(header_html, unsafe_allow_html=True)
+                        
+                        # Build data rows
+                        rows_html = ""
+                        for he in range(1, 25):
+                            row_data = date_data[date_data['HE'] == he]
+                            rows_html += f"<div style='display: grid; grid-template-columns: {header_cols}; gap: 4px; margin-bottom: 2px;'>"
+                            rows_html += f"<div style='text-align: center; font-size: 11px; font-weight: bold; padding: 4px 0;'>{he}</div>"
+                            
+                            for region_name in region_names:
+                                col_name = available_regions[region_name]
+                                if not row_data.empty and col_name in row_data.columns:
+                                    val = row_data[col_name].iloc[0]
+                                    if pd.notna(val):
+                                        color = get_color_for_value(val, region_mins.get(region_name, 0), region_maxs.get(region_name, 1), reverse=True)
+                                        rows_html += f"<div style='background: {color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 11px; font-weight: bold;'>{val:,.0f}</div>"
+                                    else:
+                                        rows_html += "<div style='background: #333; color: #666; padding: 4px; border-radius: 4px; text-align: center; font-size: 11px;'>-</div>"
                                 else:
-                                    st.info("No data")
-
-
-
+                                    rows_html += "<div style='background: #333; color: #666; padding: 4px; border-radius: 4px; text-align: center; font-size: 11px;'>-</div>"
+                            
+                            rows_html += "</div>"
+                        
+                        st.markdown(rows_html, unsafe_allow_html=True)
+                        
+                        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                        if st.button("Close", key="close_wind_region", type="primary", use_container_width=True):
+                            if 'wind_region_dialog_active' in st.session_state:
+                                del st.session_state['wind_region_dialog_active']
+                            del st.session_state['wind_region_popup_date']
+                            st.rerun()
+                    
                     show_wind_region_dialog()
+                    # Clear the active flag after showing dialog
+                    if 'wind_region_dialog_active' in st.session_state:
+                        del st.session_state['wind_region_dialog_active']
 
 
                 st.markdown("### Solar")
@@ -1841,10 +1864,8 @@ def main():
 
                 if chart_type == "Daily":
                     data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                    chart_title = ""
                 else:
                     data = yf.download(ticker, period="2y", interval="1wk", progress=False)
-                    chart_title = ""
 
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
@@ -1876,11 +1897,9 @@ def main():
                         data,
                         type='candle',
                         style=s,
-                        title=chart_title,
                         ylabel='Price',
                         ylabel_lower='Volume',
                         volume=False,
-                        mav=(180,),
                         figsize=(14, 7),
                         returnfig=True,
                         datetime_format='%Y-%m-%d',
@@ -1897,7 +1916,6 @@ def main():
                     axes[0].spines['left'].set_color('white')
                     axes[0].xaxis.label.set_color('white')
                     axes[0].yaxis.label.set_color('white')
-                    axes[0].title.set_color('white')
 
                     # Remove grid but keep axes visible
                     axes[0].grid(False)
@@ -1931,4 +1949,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
