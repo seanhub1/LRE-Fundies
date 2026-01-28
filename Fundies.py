@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 
 
-st.set_page_config(page_title="Forecasts", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Fundies", layout="wide", initial_sidebar_state="collapsed")
 
 
 st.markdown("""
@@ -778,7 +778,24 @@ def get_color_for_value(value, min_val, max_val, reverse=False):
         b = 0
     return f"rgb({r}, {g}, {b})"
 
+def check_password():
+    """Simple password protection"""
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    
+    if not st.session_state.authenticated:
+        st.title("🔒 Login Required")
+        password = st.text_input("Password:", type="password", key="password_input")
+        if st.button("Login", type="primary"):
+            if password == st.secrets.get("app", {}).get("password", ""):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password")
+        st.stop()
+
 def main():
+    check_password()
     st.title("Forecasts")
     try:
         tab1, tab2, tab3 = st.tabs(["ERCOT Weekly", "PJM Weekly", "Gas"])
