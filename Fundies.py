@@ -66,11 +66,11 @@ CACHE_FILE = Path("/tmp/historical_cache.json")
 
 def make_get_request(endpoint, query_params):
     url = baseurl + endpoint
-    return requests.get(url, params=query_params)
+    return requests.get(url, params=query_params, timeout=60)
 
 def make_post_request(endpoint, json_body):
     url = baseurl + endpoint
-    return requests.post(url, json=json_body)
+    return requests.post(url, json=json_body, timeout=60)
 
 def get_new_token(user, password):
     response = make_post_request("login", {"user": user, "password": password})
@@ -125,12 +125,17 @@ def ercot_token():
         f"&response_type=id_token"
         f"&grant_type=password"
     )
-    auth_response = requests.post(AUTH_URL)
-    if auth_response.ok:
-        access_token = auth_response.json().get("access_token")
-        headers = {"Authorization": "Bearer " + access_token, "Ocp-Apim-Subscription-Key": SUBSCRIPTION}
-        return headers
-    st.error(f"Error in Authentication: {auth_response.text}")
+    try:
+        auth_response = requests.post(AUTH_URL, timeout=60)
+        if auth_response.ok:
+            access_token = auth_response.json().get("access_token")
+            headers = {"Authorization": "Bearer " + access_token, "Ocp-Apim-Subscription-Key": SUBSCRIPTION}
+            return headers
+        st.error(f"Error in Authentication: {auth_response.text}")
+    except requests.exceptions.Timeout:
+        st.error("ERCOT authentication timed out")
+    except Exception as e:
+        st.error(f"ERCOT authentication error: {str(e)}")
     return None
 
 def ercot_token_outages():
@@ -149,20 +154,26 @@ def ercot_token_outages():
         'response_type': 'id_token',
         'grant_type': 'password',
     }
-    resp = requests.post(AUTH_URL, data=data)
-    if resp.ok:
-        access_token = resp.json().get("access_token")
-        headers = {
-            "Authorization": "Bearer " + access_token,
-            "Ocp-Apim-Subscription-Key": SUBSCRIPTION
-        }
-        return headers
-    raise Exception(f"Error in Authentication: {resp.text}")
+    try:
+        resp = requests.post(AUTH_URL, data=data, timeout=60)
+        if resp.ok:
+            access_token = resp.json().get("access_token")
+            headers = {
+                "Authorization": "Bearer " + access_token,
+                "Ocp-Apim-Subscription-Key": SUBSCRIPTION
+            }
+            return headers
+        st.error(f"Error in Outages Authentication: {resp.text}")
+    except requests.exceptions.Timeout:
+        st.error("ERCOT outages authentication timed out")
+    except Exception as e:
+        st.error(f"ERCOT outages authentication error: {str(e)}")
+    return None
 
 def fetch_outage_data_robust(url, headers, max_retries=3):
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, headers=headers, timeout=(30, 60))
+            response = requests.get(url, headers=headers, timeout=(60, 120))
             if response.ok:
                 return response.json()
         except (requests.exceptions.Timeout, requests.exceptions.RequestException):
@@ -178,7 +189,7 @@ def pjm_api_call(url, max_retries=3):
     }
     for attempt in range(max_retries):
         try:
-            result = requests.get(url, headers=pjm_headers, timeout=(30, 60))
+            result = requests.get(url, headers=pjm_headers, timeout=(60, 120))
             if result.ok:
                 return result.json()
         except requests.exceptions.RequestException:
@@ -368,6 +379,8 @@ def fetch_meteologica_data(cache_time):
 @st.cache_data(ttl=3600)
 def fetch_outage_data(cache_time):
     headers = ercot_token_outages()
+    if not headers:
+        return None, cache_time
     today = datetime.today().strftime('%Y-%m-%d')
     url = f"https://api.ercot.com/api/public-reports/np3-233-cd/hourly_res_outage_cap?operatingDateFrom={today}"
     json_data = fetch_outage_data_robust(url, headers)
@@ -398,13 +411,15 @@ def fetch_outage_data(cache_time):
         return df, cache_time
     return None, cache_time
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid hammering Gist
+@st.cache_data(ttl=3600)  # Cache for 1 hour - Gist only updates at HE17 and HE01
 def load_historical_cache():
     """Load snapshots from GitHub Gist"""
     try:
         gist_url = st.secrets.get("gist", {}).get("snapshot_url")
         if gist_url:
-            response = requests.get(gist_url, timeout=10)
+            # Add cache-busting parameter to avoid GitHub CDN caching issues
+            cache_buster = f"?cb={int(time.time() // 3600)}"  # Changes every hour
+            response = requests.get(gist_url + cache_buster, timeout=30)
             if response.ok:
                 return response.json()
     except Exception as e:
@@ -450,7 +465,7 @@ def upload_to_gist(cache_data):
                 }
             }
         }
-        response = requests.patch(url, headers=headers, json=payload, timeout=30)
+        response = requests.patch(url, headers=headers, json=payload, timeout=60)
         return response.ok
     except Exception as e:
         return False
