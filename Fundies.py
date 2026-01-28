@@ -32,23 +32,23 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Auto-refresh once per hour at 16:30 past each hour Central Time (e.g., 1:16:30, 2:16:30, etc.)
+# Auto-refresh once per hour at 16:30 past each hour CT
 def get_refresh_info():
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo('America/Chicago'))
     target_minute = 16
     target_second = 30
     
-    # Calculate seconds into current hour
+    
     current_seconds_into_hour = now.minute * 60 + now.second
     target_seconds_into_hour = target_minute * 60 + target_second  # 990 seconds = 16:30
     
     if current_seconds_into_hour < target_seconds_into_hour:
-        # Refresh point is later this hour
+        
         seconds_until = target_seconds_into_hour - current_seconds_into_hour
         next_refresh = now.replace(minute=target_minute, second=target_second, microsecond=0)
     else:
-        # Refresh point is next hour
+        
         seconds_remaining_this_hour = 3600 - current_seconds_into_hour
         seconds_until = seconds_remaining_this_hour + target_seconds_into_hour
         next_refresh = (now + timedelta(hours=1)).replace(minute=target_minute, second=target_second, microsecond=0)
@@ -58,10 +58,10 @@ def get_refresh_info():
 refresh_seconds, next_refresh_time = get_refresh_info()
 st.markdown(f'<meta http-equiv="refresh" content="{refresh_seconds}">', unsafe_allow_html=True)
 
-# Load from Streamlit secrets (no .env file needed)
+# Load from Streamlit secrets 
 baseurl = "https://api-markets.meteologica.com/api/v1/"
 
-# Cache file location (use temp directory for cloud)
+
 CACHE_FILE = Path("/tmp/historical_cache.json")
 
 def make_get_request(endpoint, query_params):
@@ -435,7 +435,7 @@ def load_historical_cache():
     return None
 
 def save_historical_cache(cache_data):
-    """Save to local file only (backup)"""
+    
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(CACHE_FILE, 'w') as f:
@@ -636,7 +636,7 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
             'HE01_snapshot': {'captured_date': None, 'data': {}}
         }
 
-    # Check if we need to capture a snapshot
+    # Check snapshot
     snapshot_captured = False
     
     # HE17 window: 4-6 PM CT (hour 16-17)
@@ -656,7 +656,7 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
             st.session_state[session_key] = True
             st.success(f"📸 Captured HE17 snapshot at {now.strftime('%I:%M %p')} CT")
     
-    # HE01 window: 12-1 AM CT (hour 0, just after midnight)
+    # HE01 
     if current_hour == 0:
         he01_captured_date = cache.get('HE01_snapshot', {}).get('captured_date')
         session_key = f"he01_captured_{today}"
@@ -673,25 +673,25 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
             st.session_state[session_key] = True
             st.success(f"📸 Captured HE01 snapshot at {now.strftime('%I:%M %p')} CT")
     
-    # Upload to Gist if we captured a new snapshot
+    # Upload to Gist 
     if snapshot_captured:
         if upload_to_gist(cache):
-            st.success("✅ Snapshot uploaded to Gist")
+            st.success(" Snapshot uploaded")
             # Clear the Gist cache so next load gets fresh data
             load_historical_cache.clear()
         else:
-            st.warning("⚠️ Failed to upload to Gist (check secrets)")
+            st.warning(" Failed to upload to Gist")
         # Also save locally as backup
         save_historical_cache(cache)
 
-    # Handle both HE1_snapshot and HE01_snapshot key variations
+    # Handle both HE1_snapshot or HE01_snapshot
     he01_data = cache.get('HE01_snapshot') or cache.get('HE1_snapshot') or {'captured_date': None, 'data': {}}
     he17_data = cache.get('HE17_snapshot') or {'captured_date': None, 'data': {}}
 
     display_cache = {}
     yesterday = today - timedelta(days=1)
 
-    # HE17 snapshot is used for comparison
+    # HE17 snapshot 
     he17_captured = he17_data.get('captured_date')
     if he17_captured:
         display_cache['yesterday_HE17'] = {
@@ -704,7 +704,7 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
             'data': {}
         }
 
-    # HE01 snapshot is used for comparison
+    # HE01 snapshot 
     he01_captured = he01_data.get('captured_date')
     if he01_captured:
         display_cache['today_HE1'] = {
@@ -727,7 +727,7 @@ def display_cache_status(cache):
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo('America/Chicago'))
         
-        # Handle both key variations
+        
         he17_data = cache.get('HE17_snapshot', {})
         he01_data = cache.get('HE01_snapshot') or cache.get('HE1_snapshot', {})
         
@@ -834,8 +834,8 @@ def main():
         if raw_cache:
             display_cache_status(raw_cache)
         
-        # Clear popup states if dialog was dismissed (clicked outside)
-        # This prevents the dialog from re-opening on the next interaction
+        
+        
         if 'ercot_popup_date' in st.session_state and 'ercot_dialog_active' not in st.session_state:
             del st.session_state['ercot_popup_date']
         if 'pjm_popup_date' in st.session_state and 'pjm_dialog_active' not in st.session_state:
@@ -1084,7 +1084,7 @@ def main():
                                 region_mins[region_name] = vals.min() if len(vals) > 0 else 0
                                 region_maxs[region_name] = vals.max() if len(vals) > 0 else 1
                         
-                        # Build header row
+                       
                         region_names = list(available_regions.keys())
                         num_regions = len(region_names)
                         header_cols = "40px " + " ".join(["1fr"] * num_regions)
@@ -1096,7 +1096,7 @@ def main():
                         header_html += "</div>"
                         st.markdown(header_html, unsafe_allow_html=True)
                         
-                        # Build data rows
+                        
                         rows_html = ""
                         for he in range(1, 25):
                             row_data = date_data[date_data['HE'] == he]
@@ -1127,7 +1127,7 @@ def main():
                             st.rerun()
                     
                     show_wind_region_dialog()
-                    # Clear the active flag after showing dialog
+                    
                     if 'wind_region_dialog_active' in st.session_state:
                         del st.session_state['wind_region_dialog_active']
 
@@ -1264,7 +1264,7 @@ def main():
                             else:
                                 st.markdown("<div style='text-align: center; padding: 5px 3px; font-size: 12px;'>N/A</div>", unsafe_allow_html=True)
 
-                # Popup Dialog for ERCOT date details
+                # Popup Dialog for ERCOT date
                 if 'ercot_popup_date' in st.session_state:
                     @st.dialog("Load Details", width="large")
                     def show_ercot_dialog():
@@ -1275,7 +1275,7 @@ def main():
                         wind_date_data = met_wind_df[met_wind_df['deliveryDate'] == popup_date] if met_wind_df is not None else None
                         solar_date_data = met_solar_df[met_solar_df['deliveryDate'] == popup_date] if met_solar_df is not None else None
                         
-                        # Pre-calculate net loads for color scaling
+                        
                         net_loads_all = []
                         if wind_date_data is not None and solar_date_data is not None and not wind_date_data.empty and not solar_date_data.empty:
                             for idx in range(24):
@@ -1290,7 +1290,7 @@ def main():
                         popup_net_max = max(net_loads_all) if net_loads_all else 1
                         
                         if not hours_data.empty:
-                            # Compact table header
+                            
                             st.markdown("""
                                 <div style='display: grid; grid-template-columns: 40px 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 4px; font-size: 11px; font-weight: bold; color: #888;'>
                                     <div style='text-align: center;'>HE</div>
@@ -1301,7 +1301,7 @@ def main():
                                 </div>
                             """, unsafe_allow_html=True)
                             
-                            # Build all rows as compact grid
+                            
                             rows_html = ""
                             for idx in range(24):
                                 he = idx + 1
@@ -1402,7 +1402,7 @@ def main():
                                 del st.session_state['ercot_popup_date']
                                 st.rerun()
                     show_ercot_dialog()
-                    # Clear the active flag after showing dialog so clicking outside will clean up
+                    
                     if 'ercot_dialog_active' in st.session_state:
                         del st.session_state['ercot_dialog_active']
 
@@ -1769,7 +1769,7 @@ def main():
                             else:
                                 st.markdown("<div style='text-align: center; padding: 5px 3px; font-size: 12px;'>N/A</div>", unsafe_allow_html=True)
 
-                # Popup Dialog for PJM date details
+                # Popup Dialog for PJM date
                 if 'pjm_popup_date' in st.session_state:
                     @st.dialog("PJM Load Details", width="large")
                     def show_pjm_dialog():
@@ -1780,7 +1780,7 @@ def main():
                         wind_date_data = pjm_met_wind_df[pjm_met_wind_df['deliveryDate'] == popup_date] if pjm_met_wind_df is not None else None
                         solar_date_data = pjm_met_solar_df[pjm_met_solar_df['deliveryDate'] == popup_date] if pjm_met_solar_df is not None else None
                         
-                        # Pre-calculate net loads for color scaling
+                        
                         net_loads_all = []
                         if wind_date_data is not None and solar_date_data is not None and not wind_date_data.empty and not solar_date_data.empty:
                             for idx in range(24):
@@ -1795,7 +1795,7 @@ def main():
                         pjm_popup_net_max = max(net_loads_all) if net_loads_all else 1
                         
                         if not hours_data.empty:
-                            # Compact table header
+                            
                             st.markdown("""
                                 <div style='display: grid; grid-template-columns: 40px 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 4px; font-size: 11px; font-weight: bold; color: #888;'>
                                     <div style='text-align: center;'>HE</div>
@@ -1806,7 +1806,7 @@ def main():
                                 </div>
                             """, unsafe_allow_html=True)
                             
-                            # Build all rows as compact grid
+                            
                             rows_html = ""
                             for idx in range(24):
                                 he = idx + 1
@@ -1907,7 +1907,7 @@ def main():
                                 del st.session_state['pjm_popup_date']
                                 st.rerun()
                     show_pjm_dialog()
-                    # Clear the active flag after showing dialog so clicking outside will clean up
+                    
                     if 'pjm_dialog_active' in st.session_state:
                         del st.session_state['pjm_dialog_active']
 
@@ -1939,11 +1939,11 @@ def main():
                 data.index = pd.to_datetime(data.index).tz_localize(None)
 
                 if not data.empty:
-                    # Get current price (most recent close)
+                    
                     current_price = data['Close'].iloc[-1]
                     current_date = data.index[-1].strftime('%Y-%m-%d')
 
-                    # Display current price above chart
+                    
                     st.markdown(f"""
                         <div style='text-align: center; padding: 5px; margin-bottom: 3px;'>
                             <div style='font-size: 18px; color: #888888;'>Current Price (as of {current_date})</div>
@@ -1952,7 +1952,7 @@ def main():
                         </div>
                     """, unsafe_allow_html=True)
 
-                    # Create custom style without grid
+                    
                     mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
                     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='', y_on_right=True, facecolor='#0e1117', edgecolor='#ffffff')
 
@@ -1969,7 +1969,7 @@ def main():
                         xrotation=45
                     )
 
-                    # Configure main price axis (right side)
+                    # Configure main price axis 
                     axes[0].yaxis.set_label_position('right')
                     axes[0].yaxis.tick_right()
                     axes[0].tick_params(axis='both', colors='white', labelsize=10)
@@ -1980,10 +1980,10 @@ def main():
                     axes[0].xaxis.label.set_color('white')
                     axes[0].yaxis.label.set_color('white')
 
-                    # Remove grid but keep axes visible
+                    
                     axes[0].grid(False)
 
-                    # Configure volume axis if present
+                    # Configure volume axis 
                     if len(axes) > 1:
                         axes[1].grid(False)
                         axes[1].tick_params(axis='both', colors='white', labelsize=10)
@@ -2012,6 +2012,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
