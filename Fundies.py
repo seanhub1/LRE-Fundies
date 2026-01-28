@@ -1202,7 +1202,8 @@ def main():
                                 
                                 load_color = get_color_for_value(load_val, min_load, max_load)
                                 wind_color = get_color_for_value(wind_val, wind_min, wind_max, reverse=True)
-                                solar_color = get_color_for_value(solar_val, solar_min, solar_max, reverse=True)
+                                solar_color = '#333333' if solar_val == 0 else get_color_for_value(solar_val, solar_min, solar_max, reverse=True)
+                                solar_text_color = '#666666' if solar_val == 0 else '#000'
                                 net_color = get_color_for_value(net_val, popup_net_min, popup_net_max)
                                 
                                 rows_html += f"""
@@ -1210,7 +1211,7 @@ def main():
                                         <div style='text-align: center; font-size: 11px; font-weight: bold; padding: 4px 0;'>{he}</div>
                                         <div style='background: {load_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{load_val:,.0f}</div>
                                         <div style='background: {wind_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{wind_val:,.0f}</div>
-                                        <div style='background: {solar_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{solar_val:,.0f}</div>
+                                        <div style='background: {solar_color}; color: {solar_text_color}; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{solar_val:,.0f}</div>
                                         <div style='background: {net_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{net_val:,.0f}</div>
                                     </div>
                                 """
@@ -1704,7 +1705,8 @@ def main():
                                 
                                 load_color = get_color_for_value(load_val, pjm_min_load, pjm_max_load)
                                 wind_color = get_color_for_value(wind_val, pjm_wind_min, pjm_wind_max, reverse=True)
-                                solar_color = get_color_for_value(solar_val, pjm_solar_min, pjm_solar_max, reverse=True)
+                                solar_color = '#333333' if solar_val == 0 else get_color_for_value(solar_val, pjm_solar_min, pjm_solar_max, reverse=True)
+                                solar_text_color = '#666666' if solar_val == 0 else '#000'
                                 net_color = get_color_for_value(net_val, pjm_popup_net_min, pjm_popup_net_max)
                                 
                                 rows_html += f"""
@@ -1712,7 +1714,7 @@ def main():
                                         <div style='text-align: center; font-size: 11px; font-weight: bold; padding: 4px 0;'>{he}</div>
                                         <div style='background: {load_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{load_val:,.0f}</div>
                                         <div style='background: {wind_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{wind_val:,.0f}</div>
-                                        <div style='background: {solar_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{solar_val:,.0f}</div>
+                                        <div style='background: {solar_color}; color: {solar_text_color}; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{solar_val:,.0f}</div>
                                         <div style='background: {net_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{net_val:,.0f}</div>
                                     </div>
                                 """
