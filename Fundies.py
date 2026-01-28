@@ -785,13 +785,15 @@ def check_password():
     
     if not st.session_state.authenticated:
         st.title("Goat Farmers Only")
-        password = st.text_input("Password:", type="password", key="password_input")
-        if st.button("Login", type="primary"):
-            if password == st.secrets.get("app", {}).get("password", ""):
-                st.session_state.authenticated = True
-                st.rerun()
-            else:
-                st.error("Incorrect password")
+        with st.form("login_form"):
+            password = st.text_input("Password:", type="password", key="password_input")
+            submitted = st.form_submit_button("Login", type="primary")
+            if submitted:
+                if password == st.secrets.get("app", {}).get("password", ""):
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("That's wrong")
         st.stop()
 
 def main():
@@ -2010,6 +2012,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
