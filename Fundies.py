@@ -779,12 +779,12 @@ def get_color_for_value(value, min_val, max_val, reverse=False):
     return f"rgb({r}, {g}, {b})"
 
 def check_password():
-    """Simple password protection"""
+    
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     
     if not st.session_state.authenticated:
-        st.title("🔒 Login Required")
+        st.title("Goat Farmers Only")
         password = st.text_input("Password:", type="password", key="password_input")
         if st.button("Login", type="primary"):
             if password == st.secrets.get("app", {}).get("password", ""):
@@ -2010,4 +2010,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
