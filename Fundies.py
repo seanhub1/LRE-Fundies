@@ -929,18 +929,11 @@ def main():
                         peak_wind = wind_avgs[idx]
                         peak_color = get_color_for_value(peak_wind, wind_min_pk, wind_max_pk, reverse=True)
                         with cols[idx]:
-                            # Add date button for regional popup (only for first 7 days where we have regional data)
-                            if wind_regional_df is not None and not wind_regional_df.empty and idx < 7:
-                                if st.button(f" {date_obj.strftime('%m/%d')}", key=f"wind_region_{date}", use_container_width=True):
+                            # Add date button for all days - only first 7 open regional popup
+                            if st.button(f" {date_obj.strftime('%m/%d')}", key=f"wind_region_{date}", use_container_width=True):
+                                if wind_regional_df is not None and not wind_regional_df.empty and idx < 7:
                                     st.session_state['wind_region_popup_date'] = date
                                     st.session_state['wind_region_dialog_active'] = True
-                            else:
-                                # For days 8-14 (or if no regional data), show static date box
-                                st.markdown(f"""
-                                    <div style='text-align: center; padding: 6px 3px; margin-bottom: 4px;'>
-                                        <div style='font-size: 13px; font-weight: bold; color: #888888;'>{date_obj.strftime('%m/%d')}</div>
-                                    </div>
-                                """, unsafe_allow_html=True)
                             st.markdown(f"""
                                 <div style='text-align: center; padding: 10px 3px; background-color: {peak_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
                                     <div style='font-size: 18px; font-weight: bold; color: #000000;'>{peak_wind:,.0f}</div>
