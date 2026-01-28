@@ -796,7 +796,7 @@ def check_password():
 
 def main():
     check_password()
-    st.title("Forecasts")
+    st.title("Fundies")
     try:
         tab1, tab2, tab3 = st.tabs(["ERCOT Weekly", "PJM Weekly", "Gas"])
         with st.spinner("Loading forecast data..."):
@@ -2010,5 +2010,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
