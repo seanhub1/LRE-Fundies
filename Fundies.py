@@ -934,6 +934,13 @@ def main():
                                 if st.button(f" {date_obj.strftime('%m/%d')}", key=f"wind_region_{date}", use_container_width=True):
                                     st.session_state['wind_region_popup_date'] = date
                                     st.session_state['wind_region_dialog_active'] = True
+                            else:
+                                # For days 8-14 (or if no regional data), show static date box
+                                st.markdown(f"""
+                                    <div style='text-align: center; padding: 6px 3px; margin-bottom: 4px;'>
+                                        <div style='font-size: 13px; font-weight: bold; color: #888888;'>{date_obj.strftime('%m/%d')}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
                             st.markdown(f"""
                                 <div style='text-align: center; padding: 10px 3px; background-color: {peak_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
                                     <div style='font-size: 18px; font-weight: bold; color: #000000;'>{peak_wind:,.0f}</div>
