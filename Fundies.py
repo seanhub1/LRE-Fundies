@@ -32,6 +32,28 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Auto-refresh once per hour at 16:30 past each hour Central Time (e.g., 1:16:30, 2:16:30, etc.)
+def get_seconds_until_next_refresh():
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo('America/Chicago'))
+    target_minute = 16
+    target_second = 30
+    
+    # Calculate seconds into current hour
+    current_seconds_into_hour = now.minute * 60 + now.second
+    target_seconds_into_hour = target_minute * 60 + target_second  # 990 seconds = 16:30
+    
+    if current_seconds_into_hour < target_seconds_into_hour:
+        # Refresh point is later this hour
+        return target_seconds_into_hour - current_seconds_into_hour
+    else:
+        # Refresh point is next hour
+        seconds_remaining_this_hour = 3600 - current_seconds_into_hour
+        return seconds_remaining_this_hour + target_seconds_into_hour
+
+refresh_seconds = get_seconds_until_next_refresh()
+st.markdown(f'<meta http-equiv="refresh" content="{refresh_seconds}">', unsafe_allow_html=True)
+
 # Load from Streamlit secrets (no .env file needed)
 baseurl = "https://api-markets.meteologica.com/api/v1/"
 
@@ -260,12 +282,13 @@ region_mapping = {
     'System Wide': 'systemWideForecast'
 }
 def get_cache_time():
-    now = datetime.now()
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo('America/Chicago'))
     if now.minute >= 5:
         cache_hour = now.replace(minute=5, second=0, microsecond=0)
     else:
         cache_hour = (now - timedelta(hours=1)).replace(minute=5, second=0, microsecond=0)
-    return cache_hour.strftime('%Y-%m-%d %H:%M:%S')
+    return cache_hour.strftime('%Y-%m-%d %H:%M:%S CT')
 
 @st.cache_data(ttl=7300)
 def fetch_forecast_data(cache_time):
@@ -544,7 +567,8 @@ def create_snapshot_data(met_load_df, met_wind_df, met_solar_df, df, outage_df,
 def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, outage_df,
                                    pjm_met_load_df, pjm_met_wind_df, pjm_met_solar_df, pjm_load_df, pjm_outage_df):
     cache = load_historical_cache()
-    now = datetime.now()
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo('America/Chicago'))
     today = now.date()
 
     if cache is None:
@@ -588,7 +612,7 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
                 'last_updated': now.isoformat()
             }
             save_historical_cache(cache)
-            st.success(f"Captured HE1 snapshot at {now.strftime('%I:%M %p')}")
+            st.success(f"Captured HE1 snapshot at {now.strftime('%I:%M %p')} CT")
 
     display_cache = {}
     yesterday = today - timedelta(days=1)
@@ -617,14 +641,15 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
             'data': {}
         }
 
-    display_cache['fetch_time'] = now.strftime('%Y-%m-%d %H:%M:%S')
+    display_cache['fetch_time'] = now.strftime('%Y-%m-%d %H:%M:%S CT')
 
     return display_cache
 
 def display_cache_status(cache):
     with st.sidebar:
         st.markdown("### Snapshot Status")
-        now = datetime.now()
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo('America/Chicago'))
         current_hour = now.hour
         he17_captured = cache.get('HE17_snapshot', {}).get('captured_date')
         he17_updated = cache.get('HE17_snapshot', {}).get('last_updated')
@@ -1803,7 +1828,7 @@ def main():
 
         # Tab 3 - Gas
         with tab3:
-            st.header("Natural Gas Futures")
+            st.header("NG Futures")
 
             chart_type = st.radio("Select Timeframe:", ["Daily", "Weekly"], horizontal=True)
 
@@ -1812,10 +1837,10 @@ def main():
 
                 if chart_type == "Daily":
                     data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                    chart_title = "Natural Gas (NG=F) - Daily Candlestick Chart with 180-Day MA"
+                    chart_title = ""
                 else:
                     data = yf.download(ticker, period="2y", interval="1wk", progress=False)
-                    chart_title = "Natural Gas (NG=F) - Weekly Candlestick Chart with 180-Day MA"
+                    chart_title = ""
 
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
@@ -1890,7 +1915,7 @@ def main():
                     st.image(buf, use_container_width=True)
                     plt.close(fig)
                 else:
-                    st.warning("No data available for Natural Gas futures")
+                    st.warning("No data available for NG futures")
 
             except Exception as e:
                 st.error(f"Error fetching Natural Gas data: {str(e)}")
