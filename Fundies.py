@@ -1851,7 +1851,7 @@ def main():
 
         # Tab 3 - Gas
         with tab3:
-            st.header("Natural Gas Futures")
+            st.header("NG Futures")
 
             chart_type = st.radio("Select Timeframe:", ["Daily", "Weekly"], horizontal=True)
 
@@ -1893,7 +1893,7 @@ def main():
                         data,
                         type='candle',
                         style=s,
-                        title='NG Futures',
+                        title='',
                         ylabel='Price',
                         ylabel_lower='Volume',
                         volume=False,
@@ -1947,3 +1947,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
