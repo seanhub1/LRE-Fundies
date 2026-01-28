@@ -398,23 +398,61 @@ def fetch_outage_data(cache_time):
         return df, cache_time
     return None, cache_time
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid hammering Gist
 def load_historical_cache():
+    """Load snapshots from GitHub Gist"""
+    try:
+        gist_url = st.secrets.get("gist", {}).get("snapshot_url")
+        if gist_url:
+            response = requests.get(gist_url, timeout=10)
+            if response.ok:
+                return response.json()
+    except Exception as e:
+        pass  # Silently fail, return None
+    
+    # Fallback to local file (for local development)
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, 'r') as f:
                 return json.load(f)
         except:
-            return None
+            pass
     return None
 
 def save_historical_cache(cache_data):
+    """Save to local file only (backup)"""
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(CACHE_FILE, 'w') as f:
             json.dump(cache_data, f, indent=2, default=str)
         return True
     except Exception as e:
-        st.warning(f"Could not save cache: {e}")
+        return False
+
+def upload_to_gist(cache_data):
+    """Upload snapshot data to GitHub Gist"""
+    try:
+        gist_token = st.secrets.get("gist", {}).get("token")
+        gist_id = st.secrets.get("gist", {}).get("id")
+        
+        if not gist_token or not gist_id:
+            return False
+        
+        url = f"https://api.github.com/gists/{gist_id}"
+        headers = {
+            "Authorization": f"token {gist_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        payload = {
+            "files": {
+                "fundies_snapshots.json": {
+                    "content": json.dumps(cache_data, indent=2, default=str)
+                }
+            }
+        }
+        response = requests.patch(url, headers=headers, json=payload, timeout=30)
+        return response.ok
+    except Exception as e:
         return False
 
 def create_snapshot_data(met_load_df, met_wind_df, met_solar_df, df, outage_df,
@@ -570,78 +608,97 @@ def create_snapshot_data(met_load_df, met_wind_df, met_solar_df, df, outage_df,
 
 def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, outage_df,
                                    pjm_met_load_df, pjm_met_wind_df, pjm_met_solar_df, pjm_load_df, pjm_outage_df):
+    """Load snapshots from Gist, capture new ones if in window, and format for display"""
     cache = load_historical_cache()
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo('America/Chicago'))
     today = now.date()
+    current_hour = now.hour
 
     if cache is None:
         cache = {
-            'HE17_snapshot': {
-                'captured_date': None,
-                'data': {},
-                'last_updated': None
-            },
-            'HE1_snapshot': {
-                'captured_date': None,
-                'data': {},
-                'last_updated': None
-            }
+            'HE17_snapshot': {'captured_date': None, 'data': {}},
+            'HE01_snapshot': {'captured_date': None, 'data': {}}
         }
 
-    current_hour = now.hour
-
-    if 16 <= current_hour < 18:
-        last_updated = cache['HE17_snapshot'].get('last_updated')
-        if last_updated is None or datetime.fromisoformat(last_updated).date() < today:
+    # Check if we need to capture a snapshot
+    snapshot_captured = False
+    
+    # HE17 window: 4-6 PM CT (hour 16-17)
+    if 16 <= current_hour <= 17:
+        he17_captured_date = cache.get('HE17_snapshot', {}).get('captured_date')
+        session_key = f"he17_captured_{today}"
+        if he17_captured_date != str(today) and session_key not in st.session_state:
+            # Capture HE17 snapshot
             snapshot = create_snapshot_data(met_load_df, met_wind_df, met_solar_df, df, outage_df,
                                pjm_met_load_df, pjm_met_wind_df, pjm_met_solar_df, pjm_load_df, pjm_outage_df)
             cache['HE17_snapshot'] = {
                 'captured_date': str(today),
-                'data': snapshot,
-                'last_updated': now.isoformat()
+                'capture_time': now.isoformat(),
+                'data': snapshot
             }
-            save_historical_cache(cache)
-            st.success("Captured HE17 snapshot")
-
-    if 0 <= current_hour < 2:
-        last_updated = cache['HE1_snapshot'].get('last_updated')
-        captured_date = cache['HE1_snapshot'].get('captured_date')
-        if last_updated is None or captured_date != str(today):
+            snapshot_captured = True
+            st.session_state[session_key] = True
+            st.success(f"📸 Captured HE17 snapshot at {now.strftime('%I:%M %p')} CT")
+    
+    # HE01 window: 12-1 AM CT (hour 0, just after midnight)
+    if current_hour == 0:
+        he01_captured_date = cache.get('HE01_snapshot', {}).get('captured_date')
+        session_key = f"he01_captured_{today}"
+        if he01_captured_date != str(today) and session_key not in st.session_state:
+            # Capture HE01 snapshot
             snapshot = create_snapshot_data(met_load_df, met_wind_df, met_solar_df, df, outage_df,
                                pjm_met_load_df, pjm_met_wind_df, pjm_met_solar_df, pjm_load_df, pjm_outage_df)
-            cache['HE1_snapshot'] = {
+            cache['HE01_snapshot'] = {
                 'captured_date': str(today),
-                'data': snapshot,
-                'last_updated': now.isoformat()
+                'capture_time': now.isoformat(),
+                'data': snapshot
             }
-            save_historical_cache(cache)
-            st.success(f"Captured HE1 snapshot at {now.strftime('%I:%M %p')} CT")
+            snapshot_captured = True
+            st.session_state[session_key] = True
+            st.success(f"📸 Captured HE01 snapshot at {now.strftime('%I:%M %p')} CT")
+    
+    # Upload to Gist if we captured a new snapshot
+    if snapshot_captured:
+        if upload_to_gist(cache):
+            st.success("✅ Snapshot uploaded to Gist")
+            # Clear the Gist cache so next load gets fresh data
+            load_historical_cache.clear()
+        else:
+            st.warning("⚠️ Failed to upload to Gist (check secrets)")
+        # Also save locally as backup
+        save_historical_cache(cache)
+
+    # Handle both HE1_snapshot and HE01_snapshot key variations
+    he01_data = cache.get('HE01_snapshot') or cache.get('HE1_snapshot') or {'captured_date': None, 'data': {}}
+    he17_data = cache.get('HE17_snapshot') or {'captured_date': None, 'data': {}}
 
     display_cache = {}
     yesterday = today - timedelta(days=1)
 
-    he17_captured = cache['HE17_snapshot'].get('captured_date')
-    if he17_captured and he17_captured == str(yesterday):
+    # HE17 snapshot is used for comparison
+    he17_captured = he17_data.get('captured_date')
+    if he17_captured:
         display_cache['yesterday_HE17'] = {
-            'date': yesterday,
-            'data': cache['HE17_snapshot']['data']
+            'date': he17_captured,
+            'data': he17_data.get('data', {})
         }
     else:
         display_cache['yesterday_HE17'] = {
-            'date': yesterday,
+            'date': str(yesterday),
             'data': {}
         }
 
-    he1_captured = cache['HE1_snapshot'].get('captured_date')
-    if he1_captured and he1_captured == str(today):
+    # HE01 snapshot is used for comparison
+    he01_captured = he01_data.get('captured_date')
+    if he01_captured:
         display_cache['today_HE1'] = {
-            'date': today,
-            'data': cache['HE1_snapshot']['data']
+            'date': he01_captured,
+            'data': he01_data.get('data', {})
         }
     else:
         display_cache['today_HE1'] = {
-            'date': today,
+            'date': str(today),
             'data': {}
         }
 
@@ -654,32 +711,38 @@ def display_cache_status(cache):
         st.markdown("### Snapshot Status")
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo('America/Chicago'))
-        current_hour = now.hour
-        he17_captured = cache.get('HE17_snapshot', {}).get('captured_date')
-        he17_updated = cache.get('HE17_snapshot', {}).get('last_updated')
+        
+        # Handle both key variations
+        he17_data = cache.get('HE17_snapshot', {})
+        he01_data = cache.get('HE01_snapshot') or cache.get('HE1_snapshot', {})
+        
+        he17_captured = he17_data.get('captured_date')
+        he17_updated = he17_data.get('capture_time') or he17_data.get('last_updated')
         if he17_captured:
-            st.success(f"HE17: Captured {he17_captured}")
+            st.success(f"HE17: {he17_captured}")
             if he17_updated:
-                update_time = datetime.fromisoformat(he17_updated).strftime('%I:%M %p')
-                st.caption(f"Last updated: {update_time}")
+                try:
+                    update_time = datetime.fromisoformat(he17_updated.replace('Z', '+00:00')).strftime('%I:%M %p')
+                    st.caption(f"Captured: {update_time}")
+                except:
+                    pass
         else:
-            if 16 <= current_hour < 18:
-                st.info("HE17: Capturing now...")
-            else:
-                st.warning("HE17: Waiting for 4-5pm window")
-        he1_captured = cache.get('HE1_snapshot', {}).get('captured_date')
-        he1_updated = cache.get('HE1_snapshot', {}).get('last_updated')
-        if he1_captured:
-            st.success(f"HE1: Captured {he1_captured}")
-            if he1_updated:
-                update_time = datetime.fromisoformat(he1_updated).strftime('%I:%M %p')
-                st.caption(f"Last updated: {update_time}")
+            st.warning("HE17: No snapshot")
+            
+        he01_captured = he01_data.get('captured_date')
+        he01_updated = he01_data.get('capture_time') or he01_data.get('last_updated')
+        if he01_captured:
+            st.success(f"HE01: {he01_captured}")
+            if he01_updated:
+                try:
+                    update_time = datetime.fromisoformat(he01_updated.replace('Z', '+00:00')).strftime('%I:%M %p')
+                    st.caption(f"Captured: {update_time}")
+                except:
+                    pass
         else:
-            if 0 <= current_hour < 2:
-                st.info("HE1: Capturing now...")
-            else:
-                st.warning("HE1: Waiting for midnight-2am window")
-        st.caption(f"Current time: {now.strftime('%I:%M %p')}")
+            st.warning("HE01: No snapshot")
+            
+        st.caption(f"Current: {now.strftime('%I:%M %p')} CT")
 
 def get_color_for_value(value, min_val, max_val, reverse=False):
     if max_val == min_val:
