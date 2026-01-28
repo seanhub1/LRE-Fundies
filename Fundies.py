@@ -271,7 +271,7 @@ def fetch_ercot_wind_by_region(cache_time):
                 else:
                     df['HE'] = pd.to_numeric(df['hourEnding'], errors='coerce').fillna(0).astype(int)
 
-                # CRITICAL FIX: Get only the latest forecast for each date/hour combination
+                
                 if 'postedDatetime' in df.columns:
                     df['postedDatetime'] = pd.to_datetime(df['postedDatetime'])
                     # Keep only the most recent posted forecast for each date/hour
@@ -2010,3 +2010,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
