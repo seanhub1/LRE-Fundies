@@ -810,7 +810,9 @@ def main():
             del st.session_state['wind_region_popup_date']
         
         with tab1:
-            st.caption(f"Data last fetched: {met_fetch_time} | Next refresh: {next_refresh_time}")
+            from zoneinfo import ZoneInfo
+            current_time = datetime.now(ZoneInfo('America/Chicago')).strftime('%H:%M:%S CT')
+            st.caption(f"Data last fetched: {current_time} | Next refresh: {next_refresh_time}")
             if met_load_df is not None and not met_load_df.empty:
                 min_load = met_load_df['value'].min()
                 max_load = met_load_df['value'].max()
@@ -1376,7 +1378,9 @@ def main():
 
         # Tab 2 - PJM Weekly
         with tab2:
-            st.caption(f"Data last fetched: {met_fetch_time} | Next refresh: {next_refresh_time}")
+            from zoneinfo import ZoneInfo
+            current_time = datetime.now(ZoneInfo('America/Chicago')).strftime('%H:%M:%S CT')
+            st.caption(f"Data last fetched: {current_time} | Next refresh: {next_refresh_time}")
             if pjm_met_load_df is not None and not pjm_met_load_df.empty:
                 pjm_min_load = pjm_met_load_df['value'].min()
                 pjm_max_load = pjm_met_load_df['value'].max()
