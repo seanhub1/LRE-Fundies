@@ -1887,13 +1887,13 @@ def main():
 
                     # Create custom style without grid
                     mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
-                    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='', y_on_right=True, facecolor='#0e1117', edgecolor='#ffffff')
+                    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='', y_on_right=True, facecolor='#0e1117', edgecolor='#ffffff', rc={'axes.labelcolor': 'white', 'axes.titlecolor': 'white'})
 
                     fig, axes = mpf.plot(
                         data,
                         type='candle',
                         style=s,
-                        title='/NG',
+                        title='NG Futures',
                         ylabel='Price',
                         ylabel_lower='Volume',
                         volume=False,
