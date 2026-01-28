@@ -33,7 +33,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Auto-refresh once per hour at 16:30 past each hour Central Time (e.g., 1:16:30, 2:16:30, etc.)
-def get_seconds_until_next_refresh():
+def get_refresh_info():
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo('America/Chicago'))
     target_minute = 16
@@ -45,13 +45,17 @@ def get_seconds_until_next_refresh():
     
     if current_seconds_into_hour < target_seconds_into_hour:
         # Refresh point is later this hour
-        return target_seconds_into_hour - current_seconds_into_hour
+        seconds_until = target_seconds_into_hour - current_seconds_into_hour
+        next_refresh = now.replace(minute=target_minute, second=target_second, microsecond=0)
     else:
         # Refresh point is next hour
         seconds_remaining_this_hour = 3600 - current_seconds_into_hour
-        return seconds_remaining_this_hour + target_seconds_into_hour
+        seconds_until = seconds_remaining_this_hour + target_seconds_into_hour
+        next_refresh = (now + timedelta(hours=1)).replace(minute=target_minute, second=target_second, microsecond=0)
+    
+    return seconds_until, next_refresh.strftime('%I:%M:%S %p CT')
 
-refresh_seconds = get_seconds_until_next_refresh()
+refresh_seconds, next_refresh_time = get_refresh_info()
 st.markdown(f'<meta http-equiv="refresh" content="{refresh_seconds}">', unsafe_allow_html=True)
 
 # Load from Streamlit secrets (no .env file needed)
@@ -741,6 +745,7 @@ def main():
             del st.session_state['pjm_popup_date']
         
         with tab1:
+            st.caption(f"Data last fetched: {met_fetch_time} | Next refresh: {next_refresh_time}")
             if met_load_df is not None and not met_load_df.empty:
                 min_load = met_load_df['value'].min()
                 max_load = met_load_df['value'].max()
@@ -1318,12 +1323,12 @@ def main():
                         del st.session_state['ercot_dialog_active']
 
                 st.markdown("---")
-                st.caption(f"Data last fetched: {met_fetch_time} | Auto-refresh every hour")
             else:
                 st.warning("No Meteologica load data available")
 
         # Tab 2 - PJM Weekly
         with tab2:
+            st.caption(f"Data last fetched: {met_fetch_time} | Next refresh: {next_refresh_time}")
             if pjm_met_load_df is not None and not pjm_met_load_df.empty:
                 pjm_min_load = pjm_met_load_df['value'].min()
                 pjm_max_load = pjm_met_load_df['value'].max()
@@ -1821,7 +1826,6 @@ def main():
                         del st.session_state['pjm_dialog_active']
 
                 st.markdown("---")
-                st.caption(f"Data last fetched: {met_fetch_time} | Auto-refresh every hour")
             else:
                 st.warning("No PJM Meteologica load data available")
 
@@ -1915,7 +1919,7 @@ def main():
                     st.image(buf, use_container_width=True)
                     plt.close(fig)
                 else:
-                    st.warning("No data available for NG futures")
+                    st.warning("No data available for Natural Gas futures")
 
             except Exception as e:
                 st.error(f"Error fetching Natural Gas data: {str(e)}")
@@ -1926,4 +1930,4 @@ def main():
         st.exception(e)
 
 if __name__ == "__main__":
-    main()
+    main()Fnatural gas
