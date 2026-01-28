@@ -23,6 +23,12 @@ st.markdown("""
         background-color: #0e1117;
         color: #fafafa;
     }
+    [data-testid="stHeader"] {
+        background-color: #0e1117;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #0e1117;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -1854,10 +1860,8 @@ def main():
 
                 if chart_type == "Daily":
                     data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                    chart_title = "Natural Gas (NG=F) - Daily Candlestick Chart with 180-Day MA"
                 else:
                     data = yf.download(ticker, period="2y", interval="1wk", progress=False)
-                    chart_title = "Natural Gas (NG=F) - Weekly Candlestick Chart with 180-Day MA"
 
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
@@ -1889,11 +1893,10 @@ def main():
                         data,
                         type='candle',
                         style=s,
-                        title=chart_title,
+                        title='/NG',
                         ylabel='Price',
                         ylabel_lower='Volume',
                         volume=False,
-                        mav=(180,),
                         figsize=(14, 7),
                         returnfig=True,
                         datetime_format='%Y-%m-%d',
