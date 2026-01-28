@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import os
-from dotenv import load_dotenv
 import jwt
 import time
 import plotly.graph_objects as go
@@ -1949,3 +1948,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
