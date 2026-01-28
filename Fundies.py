@@ -901,6 +901,23 @@ def main():
                             st.markdown("<div style='text-align: center; padding: 5px 3px; font-size: 12px;'>N/A</div>", unsafe_allow_html=True)
                 st.markdown("<hr style='border: none; border-top: 3px solid white; margin: 20px 0;'>", unsafe_allow_html=True)
                 st.markdown("### Wind - Onpeak (HE 7-22)")
+                
+                # Set up regional wind mapping for popup
+                if wind_regional_df is not None and not wind_regional_df.empty:
+                    region_mapping = {
+                        'COASTAL': 'STWPFCoastal',
+                        'EAST': 'STWPFEast',
+                        'FAR_WEST': 'STWPFFarWest',
+                        'NORTH': 'STWPFNorth',
+                        'NORTH_C': 'STWPFNorthC',
+                        'PANHANDLE': 'STWPFPanhandle',
+                        'SOUTH': 'STWPFSouth',
+                        'SOUTHERN': 'STWPFSouthern',
+                        'WEST': 'STWPFWest'
+                    }
+                    available_regions = {k: v for k, v in region_mapping.items() if v in wind_regional_df.columns}
+                    st.session_state['wind_region_mapping'] = available_regions
+                
                 if met_wind_df is not None and not met_wind_df.empty:
                     st.markdown("<div style='display: flex; justify-content: space-around; margin-bottom: 5px;'>" +
                                 "".join([f"<div style='text-align: center; flex: 1; font-size: 11px; color: #888888;'>{pd.to_datetime(d).strftime('%a')}</div>" for d in wind_dates]) +
@@ -912,9 +929,13 @@ def main():
                         peak_wind = wind_avgs[idx]
                         peak_color = get_color_for_value(peak_wind, wind_min_pk, wind_max_pk, reverse=True)
                         with cols[idx]:
+                            # Add date button for regional popup (only for first 7 days where we have regional data)
+                            if wind_regional_df is not None and not wind_regional_df.empty and idx < 7:
+                                if st.button(f" {date_obj.strftime('%m/%d')}", key=f"wind_region_{date}", use_container_width=True):
+                                    st.session_state['wind_region_popup_date'] = date
+                                    st.session_state['wind_region_dialog_active'] = True
                             st.markdown(f"""
                                 <div style='text-align: center; padding: 10px 3px; background-color: {peak_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                    <div style='font-size: 13px; font-weight: bold; margin-bottom: 4px; color: #000000;'>{date_obj.strftime('%m/%d')}</div>
                                     <div style='font-size: 18px; font-weight: bold; color: #000000;'>{peak_wind:,.0f}</div>
                                 </div>
                             """, unsafe_allow_html=True)
@@ -934,65 +955,6 @@ def main():
                             else:
                                 st.markdown("<div style='text-align: center; padding: 5px 3px; font-size: 12px;'>N/A</div>", unsafe_allow_html=True)
                 st.markdown("---")
-
-                # Regional Wind with Date Buttons
-                if wind_regional_df is not None and not wind_regional_df.empty:
-                    st.markdown("### Wind Forecast by Region")
-
-                    # These are the actual column names from the API
-                    region_mapping = {
-                        'COASTAL': 'STWPFCoastal',
-                        'EAST': 'STWPFEast',
-                        'FAR_WEST': 'STWPFFarWest',
-                        'NORTH': 'STWPFNorth',
-                        'NORTH_C': 'STWPFNorthC',
-                        'PANHANDLE': 'STWPFPanhandle',
-                        'SOUTH': 'STWPFSouth',
-                        'SOUTHERN': 'STWPFSouthern',
-                        'WEST': 'STWPFWest'
-                    }
-
-                    # Check which columns actually exist
-                    available_regions = {k: v for k, v in region_mapping.items() if v in wind_regional_df.columns}
-                    
-                    # Store mapping in session state for dialog
-                    st.session_state['wind_region_mapping'] = available_regions
-
-                    if available_regions:
-                        wind_regional_dates = sorted(wind_regional_df['deliveryDate'].unique())[:7]
-                        
-                        # Calculate OnPk averages for display boxes
-                        regional_onpk_totals = []
-                        for date in wind_regional_dates:
-                            date_data = wind_regional_df[wind_regional_df['deliveryDate'] == date]
-                            onpeak_data = date_data[(date_data['HE'] >= 7) & (date_data['HE'] <= 22)]
-                            total = sum(onpeak_data[col].mean() for col in available_regions.values() if col in onpeak_data.columns and not onpeak_data[col].isna().all())
-                            regional_onpk_totals.append(total)
-                        
-                        regional_min = min(regional_onpk_totals) if regional_onpk_totals else 0
-                        regional_max = max(regional_onpk_totals) if regional_onpk_totals else 1
-                        
-                        # Day of week row
-                        st.markdown("<div style='display: flex; justify-content: space-around; margin-bottom: 5px;'>" +
-                                    "".join([f"<div style='text-align: center; flex: 1; font-size: 11px; color: #888888;'>{pd.to_datetime(d).strftime('%a')}</div>" for d in wind_regional_dates]) +
-                                    "</div>", unsafe_allow_html=True)
-                        
-                        # Date buttons and value boxes
-                        cols = st.columns(7)
-                        for idx, date in enumerate(wind_regional_dates):
-                            date_obj = pd.to_datetime(date)
-                            total_wind = regional_onpk_totals[idx]
-                            wind_color = get_color_for_value(total_wind, regional_min, regional_max, reverse=True)
-                            with cols[idx]:
-                                if st.button(f" {date_obj.strftime('%m/%d')}", key=f"wind_region_{date}", use_container_width=True):
-                                    st.session_state['wind_region_popup_date'] = date
-                                    st.session_state['wind_region_dialog_active'] = True
-                                st.markdown(f"""
-                                    <div style='text-align: center; padding: 10px 3px; background-color: {wind_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                        <div style='font-size: 12px; font-weight: bold; margin-bottom: 4px; color: #000000;'>Total</div>
-                                        <div style='font-size: 16px; font-weight: bold; color: #000000;'>{total_wind:,.0f}</div>
-                                    </div>
-                                """, unsafe_allow_html=True)
 
                 # Regional Wind Popup
                 if 'wind_region_popup_date' in st.session_state and 'wind_region_mapping' in st.session_state:
