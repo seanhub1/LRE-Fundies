@@ -707,6 +707,14 @@ def main():
         raw_cache = load_historical_cache()
         if raw_cache:
             display_cache_status(raw_cache)
+        
+        # Clear popup states if dialog was dismissed (clicked outside)
+        # This prevents the dialog from re-opening on the next interaction
+        if 'ercot_popup_date' in st.session_state and 'ercot_dialog_active' not in st.session_state:
+            del st.session_state['ercot_popup_date']
+        if 'pjm_popup_date' in st.session_state and 'pjm_dialog_active' not in st.session_state:
+            del st.session_state['pjm_popup_date']
+        
         with tab1:
             if met_load_df is not None and not met_load_df.empty:
                 min_load = met_load_df['value'].min()
@@ -806,6 +814,7 @@ def main():
                     with cols[idx]:
                         if st.button(f" {date_obj.strftime('%m/%d')}", key=f"ercot_met_{date}", use_container_width=True):
                             st.session_state['ercot_popup_date'] = date
+                            st.session_state['ercot_dialog_active'] = True
                         st.markdown(f"""
                             <div style='text-align: center; padding: 10px 3px; background-color: {peak_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
                                 <div style='font-size: 13px; font-weight: bold; margin-bottom: 4px; color: #000000;'>HE{peak_hour}</div>
@@ -1147,102 +1156,67 @@ def main():
                     def show_ercot_dialog():
                         popup_date = st.session_state['ercot_popup_date']
                         date_obj = pd.to_datetime(popup_date)
-                        st.markdown(f"## {date_obj.strftime('%A, %B %d, %Y')}")
+                        st.markdown(f"#### {date_obj.strftime('%A, %B %d, %Y')}")
                         hours_data = met_load_df[met_load_df['deliveryDate'] == popup_date]
                         wind_date_data = met_wind_df[met_wind_df['deliveryDate'] == popup_date] if met_wind_df is not None else None
                         solar_date_data = met_solar_df[met_solar_df['deliveryDate'] == popup_date] if met_solar_df is not None else None
+                        
+                        # Pre-calculate net loads for color scaling
+                        net_loads_all = []
+                        if wind_date_data is not None and solar_date_data is not None and not wind_date_data.empty and not solar_date_data.empty:
+                            for idx in range(24):
+                                he = idx + 1
+                                hour_row = hours_data[hours_data['HE'] == he]
+                                wind_row = wind_date_data[wind_date_data['HE'] == he]
+                                solar_row = solar_date_data[solar_date_data['HE'] == he]
+                                if not hour_row.empty and not wind_row.empty and not solar_row.empty:
+                                    net_load = hour_row['value'].iloc[0] - (wind_row['value'].iloc[0] + solar_row['value'].iloc[0])
+                                    net_loads_all.append(net_load)
+                        popup_net_min = min(net_loads_all) if net_loads_all else 0
+                        popup_net_max = max(net_loads_all) if net_loads_all else 1
+                        
                         if not hours_data.empty:
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.markdown("**Load (MW)**")
-                                for idx in range(24):
-                                    he = idx + 1
-                                    hour_row = hours_data[hours_data['HE'] == he]
-                                    if not hour_row.empty:
-                                        load = hour_row['value'].iloc[0]
-                                        color = get_color_for_value(load, min_load, max_load)
-                                        st.markdown(f"""
-                                            <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                <div style='flex: 1; background-color: {color}; color: #000000; padding: 8px; border-radius: 6px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                                    <div style='font-size: 14px; font-weight: bold;'>{load:,.0f}</div>
-                                                </div>
-                                            </div>
-                                        """, unsafe_allow_html=True)
-                            with col2:
-                                st.markdown("**Wind (MW)**")
-                                if wind_date_data is not None and not wind_date_data.empty:
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        wind_row = wind_date_data[wind_date_data['HE'] == he]
-                                        if not wind_row.empty:
-                                            wind_val = wind_row['value'].iloc[0]
-                                            wind_pct = (wind_val / wind_date_data['value'].max() * 100) if wind_date_data['value'].max() > 0 else 0
-                                            wind_color = get_color_for_value(wind_val, wind_min, wind_max, reverse=True)
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                    <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: #1e1e1e; border-radius: 6px; padding: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); position: relative; height: 38px; display: flex; align-items: center;'>
-                                                        <div style='background: {wind_color}; width: {wind_pct}%; height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: center; position: relative;'>
-                                                            <div style='font-size: 14px; font-weight: bold; color: #ffffff; position: absolute;'>{wind_val:,.0f}</div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
-                            with col3:
-                                st.markdown("**Solar (MW)**")
-                                if solar_date_data is not None and not solar_date_data.empty:
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        solar_row = solar_date_data[solar_date_data['HE'] == he]
-                                        if not solar_row.empty:
-                                            solar_val = solar_row['value'].iloc[0]
-                                            solar_color = get_color_for_value(solar_val, solar_min, solar_max, reverse=True)
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                    <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: {solar_color}; color: #000000; padding: 8px; border-radius: 6px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                                        <div style='font-size: 14px; font-weight: bold;'>{solar_val:,.0f}</div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
-                            with col4:
-                                st.markdown("**Net Load (MW)**")
-                                if wind_date_data is not None and solar_date_data is not None and not wind_date_data.empty and not solar_date_data.empty:
-                                    net_loads = []
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        hour_row = hours_data[hours_data['HE'] == he]
-                                        wind_row = wind_date_data[wind_date_data['HE'] == he]
-                                        solar_row = solar_date_data[solar_date_data['HE'] == he]
-                                        if not hour_row.empty and not wind_row.empty and not solar_row.empty:
-                                            load = hour_row['value'].iloc[0]
-                                            wind_val = wind_row['value'].iloc[0]
-                                            solar_val = solar_row['value'].iloc[0]
-                                            net_load = load - (wind_val + solar_val)
-                                            net_loads.append(net_load)
-                                    popup_net_min = min(net_loads) if net_loads else 0
-                                    popup_net_max = max(net_loads) if net_loads else 1
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        hour_row = hours_data[hours_data['HE'] == he]
-                                        wind_row = wind_date_data[wind_date_data['HE'] == he]
-                                        solar_row = solar_date_data[solar_date_data['HE'] == he]
-                                        if not hour_row.empty and not wind_row.empty and not solar_row.empty:
-                                            load = hour_row['value'].iloc[0]
-                                            wind_val = wind_row['value'].iloc[0]
-                                            solar_val = solar_row['value'].iloc[0]
-                                            net_load = load - (wind_val + solar_val)
-                                            net_color = get_color_for_value(net_load, popup_net_min, popup_net_max)
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                    <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: {net_color}; color: #000000; padding: 8px; border-radius: 6px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                                        <div style='font-size: 14px; font-weight: bold;'>{net_load:,.0f}</div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
-                            st.markdown("<br>", unsafe_allow_html=True)
+                            # Compact table header
+                            st.markdown("""
+                                <div style='display: grid; grid-template-columns: 40px 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 4px; font-size: 11px; font-weight: bold; color: #888;'>
+                                    <div style='text-align: center;'>HE</div>
+                                    <div style='text-align: center;'>Load</div>
+                                    <div style='text-align: center;'>Wind</div>
+                                    <div style='text-align: center;'>Solar</div>
+                                    <div style='text-align: center;'>Net</div>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # Build all rows as compact grid
+                            rows_html = ""
+                            for idx in range(24):
+                                he = idx + 1
+                                hour_row = hours_data[hours_data['HE'] == he]
+                                wind_row = wind_date_data[wind_date_data['HE'] == he] if wind_date_data is not None else None
+                                solar_row = solar_date_data[solar_date_data['HE'] == he] if solar_date_data is not None else None
+                                
+                                load_val = hour_row['value'].iloc[0] if not hour_row.empty else 0
+                                wind_val = wind_row['value'].iloc[0] if wind_row is not None and not wind_row.empty else 0
+                                solar_val = solar_row['value'].iloc[0] if solar_row is not None and not solar_row.empty else 0
+                                net_val = load_val - (wind_val + solar_val)
+                                
+                                load_color = get_color_for_value(load_val, min_load, max_load)
+                                wind_color = get_color_for_value(wind_val, wind_min, wind_max, reverse=True)
+                                solar_color = get_color_for_value(solar_val, solar_min, solar_max, reverse=True)
+                                net_color = get_color_for_value(net_val, popup_net_min, popup_net_max)
+                                
+                                rows_html += f"""
+                                    <div style='display: grid; grid-template-columns: 40px 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 2px;'>
+                                        <div style='text-align: center; font-size: 11px; font-weight: bold; padding: 4px 0;'>{he}</div>
+                                        <div style='background: {load_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{load_val:,.0f}</div>
+                                        <div style='background: {wind_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{wind_val:,.0f}</div>
+                                        <div style='background: {solar_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{solar_val:,.0f}</div>
+                                        <div style='background: {net_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{net_val:,.0f}</div>
+                                    </div>
+                                """
+                            st.markdown(rows_html, unsafe_allow_html=True)
+                            
+                            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                             if st.button(f"View Chart for {date_obj.strftime('%m/%d/%Y')}", key=f"ercot_chart_{popup_date}"):
                                 chart_col1, chart_col2 = st.columns(2)
                                 with chart_col1:
@@ -1308,9 +1282,14 @@ def main():
                                     )
                                     st.plotly_chart(fig_ren, use_container_width=True)
                             if st.button("Close", key="close_ercot", type="primary", use_container_width=True):
+                                if 'ercot_dialog_active' in st.session_state:
+                                    del st.session_state['ercot_dialog_active']
                                 del st.session_state['ercot_popup_date']
                                 st.rerun()
                     show_ercot_dialog()
+                    # Clear the active flag after showing dialog so clicking outside will clean up
+                    if 'ercot_dialog_active' in st.session_state:
+                        del st.session_state['ercot_dialog_active']
 
                 st.markdown("---")
                 st.caption(f"Data last fetched: {met_fetch_time} | Auto-refresh every hour")
@@ -1420,6 +1399,7 @@ def main():
                     with cols[idx]:
                         if st.button(f" {date_obj.strftime('%m/%d')}", key=f"pjm_met_{date}", use_container_width=True):
                             st.session_state['pjm_popup_date'] = date
+                            st.session_state['pjm_dialog_active'] = True
                         st.markdown(f"""
                             <div style='text-align: center; padding: 10px 3px; background-color: {peak_color}; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
                                 <div style='font-size: 13px; font-weight: bold; margin-bottom: 4px; color: #000000;'>HE{peak_hour}</div>
@@ -1678,102 +1658,67 @@ def main():
                     def show_pjm_dialog():
                         popup_date = st.session_state['pjm_popup_date']
                         date_obj = pd.to_datetime(popup_date)
-                        st.markdown(f"## {date_obj.strftime('%A, %B %d, %Y')}")
+                        st.markdown(f"#### {date_obj.strftime('%A, %B %d, %Y')}")
                         hours_data = pjm_met_load_df[pjm_met_load_df['deliveryDate'] == popup_date]
                         wind_date_data = pjm_met_wind_df[pjm_met_wind_df['deliveryDate'] == popup_date] if pjm_met_wind_df is not None else None
                         solar_date_data = pjm_met_solar_df[pjm_met_solar_df['deliveryDate'] == popup_date] if pjm_met_solar_df is not None else None
+                        
+                        # Pre-calculate net loads for color scaling
+                        net_loads_all = []
+                        if wind_date_data is not None and solar_date_data is not None and not wind_date_data.empty and not solar_date_data.empty:
+                            for idx in range(24):
+                                he = idx + 1
+                                hour_row = hours_data[hours_data['HE'] == he]
+                                wind_row = wind_date_data[wind_date_data['HE'] == he]
+                                solar_row = solar_date_data[solar_date_data['HE'] == he]
+                                if not hour_row.empty and not wind_row.empty and not solar_row.empty:
+                                    net_load = hour_row['value'].iloc[0] - (wind_row['value'].iloc[0] + solar_row['value'].iloc[0])
+                                    net_loads_all.append(net_load)
+                        pjm_popup_net_min = min(net_loads_all) if net_loads_all else 0
+                        pjm_popup_net_max = max(net_loads_all) if net_loads_all else 1
+                        
                         if not hours_data.empty:
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.markdown("**Load (MW)**")
-                                for idx in range(24):
-                                    he = idx + 1
-                                    hour_row = hours_data[hours_data['HE'] == he]
-                                    if not hour_row.empty:
-                                        load = hour_row['value'].iloc[0]
-                                        color = get_color_for_value(load, pjm_min_load, pjm_max_load)
-                                        st.markdown(f"""
-                                            <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                <div style='flex: 1; background-color: {color}; color: #000000; padding: 8px; border-radius: 6px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                                    <div style='font-size: 14px; font-weight: bold;'>{load:,.0f}</div>
-                                                </div>
-                                            </div>
-                                        """, unsafe_allow_html=True)
-                            with col2:
-                                st.markdown("**Wind (MW)**")
-                                if wind_date_data is not None and not wind_date_data.empty:
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        wind_row = wind_date_data[wind_date_data['HE'] == he]
-                                        if not wind_row.empty:
-                                            wind_val = wind_row['value'].iloc[0]
-                                            wind_pct = (wind_val / wind_date_data['value'].max() * 100) if wind_date_data['value'].max() > 0 else 0
-                                            wind_color = get_color_for_value(wind_val, pjm_wind_min, pjm_wind_max, reverse=True)
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                    <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: #1e1e1e; border-radius: 6px; padding: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); position: relative; height: 38px; display: flex; align-items: center;'>
-                                                        <div style='background: {wind_color}; width: {wind_pct}%; height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: center; position: relative;'>
-                                                            <div style='font-size: 14px; font-weight: bold; color: #ffffff; position: absolute;'>{wind_val:,.0f}</div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
-                            with col3:
-                                st.markdown("**Solar (MW)**")
-                                if solar_date_data is not None and not solar_date_data.empty:
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        solar_row = solar_date_data[solar_date_data['HE'] == he]
-                                        if not solar_row.empty:
-                                            solar_val = solar_row['value'].iloc[0]
-                                            solar_color = get_color_for_value(solar_val, pjm_solar_min, pjm_solar_max, reverse=True)
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                    <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: {solar_color}; color: #000000; padding: 8px; border-radius: 6px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                                        <div style='font-size: 14px; font-weight: bold;'>{solar_val:,.0f}</div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
-                            with col4:
-                                st.markdown("**Net Load (MW)**")
-                                if wind_date_data is not None and solar_date_data is not None and not wind_date_data.empty and not solar_date_data.empty:
-                                    net_loads = []
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        hour_row = hours_data[hours_data['HE'] == he]
-                                        wind_row = wind_date_data[wind_date_data['HE'] == he]
-                                        solar_row = solar_date_data[solar_date_data['HE'] == he]
-                                        if not hour_row.empty and not wind_row.empty and not solar_row.empty:
-                                            load = hour_row['value'].iloc[0]
-                                            wind_val = wind_row['value'].iloc[0]
-                                            solar_val = solar_row['value'].iloc[0]
-                                            net_load = load - (wind_val + solar_val)
-                                            net_loads.append(net_load)
-                                    pjm_popup_net_min = min(net_loads) if net_loads else 0
-                                    pjm_popup_net_max = max(net_loads) if net_loads else 1
-                                    for idx in range(24):
-                                        he = idx + 1
-                                        hour_row = hours_data[hours_data['HE'] == he]
-                                        wind_row = wind_date_data[wind_date_data['HE'] == he]
-                                        solar_row = solar_date_data[solar_date_data['HE'] == he]
-                                        if not hour_row.empty and not wind_row.empty and not solar_row.empty:
-                                            load = hour_row['value'].iloc[0]
-                                            wind_val = wind_row['value'].iloc[0]
-                                            solar_val = solar_row['value'].iloc[0]
-                                            net_load = load - (wind_val + solar_val)
-                                            net_color = get_color_for_value(net_load, pjm_popup_net_min, pjm_popup_net_max)
-                                            st.markdown(f"""
-                                                <div style='display: flex; align-items: center; margin-bottom: 3px;'>
-                                                    <div style='width: 30px; text-align: center; font-size: 12px; font-weight: bold; margin-right: 5px;'>{he}</div>
-                                                    <div style='flex: 1; background-color: {net_color}; color: #000000; padding: 8px; border-radius: 6px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'>
-                                                        <div style='font-size: 14px; font-weight: bold;'>{net_load:,.0f}</div>
-                                                    </div>
-                                                </div>
-                                            """, unsafe_allow_html=True)
-                            st.markdown("<br>", unsafe_allow_html=True)
+                            # Compact table header
+                            st.markdown("""
+                                <div style='display: grid; grid-template-columns: 40px 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 4px; font-size: 11px; font-weight: bold; color: #888;'>
+                                    <div style='text-align: center;'>HE</div>
+                                    <div style='text-align: center;'>Load</div>
+                                    <div style='text-align: center;'>Wind</div>
+                                    <div style='text-align: center;'>Solar</div>
+                                    <div style='text-align: center;'>Net</div>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # Build all rows as compact grid
+                            rows_html = ""
+                            for idx in range(24):
+                                he = idx + 1
+                                hour_row = hours_data[hours_data['HE'] == he]
+                                wind_row = wind_date_data[wind_date_data['HE'] == he] if wind_date_data is not None else None
+                                solar_row = solar_date_data[solar_date_data['HE'] == he] if solar_date_data is not None else None
+                                
+                                load_val = hour_row['value'].iloc[0] if not hour_row.empty else 0
+                                wind_val = wind_row['value'].iloc[0] if wind_row is not None and not wind_row.empty else 0
+                                solar_val = solar_row['value'].iloc[0] if solar_row is not None and not solar_row.empty else 0
+                                net_val = load_val - (wind_val + solar_val)
+                                
+                                load_color = get_color_for_value(load_val, pjm_min_load, pjm_max_load)
+                                wind_color = get_color_for_value(wind_val, pjm_wind_min, pjm_wind_max, reverse=True)
+                                solar_color = get_color_for_value(solar_val, pjm_solar_min, pjm_solar_max, reverse=True)
+                                net_color = get_color_for_value(net_val, pjm_popup_net_min, pjm_popup_net_max)
+                                
+                                rows_html += f"""
+                                    <div style='display: grid; grid-template-columns: 40px 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 2px;'>
+                                        <div style='text-align: center; font-size: 11px; font-weight: bold; padding: 4px 0;'>{he}</div>
+                                        <div style='background: {load_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{load_val:,.0f}</div>
+                                        <div style='background: {wind_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{wind_val:,.0f}</div>
+                                        <div style='background: {solar_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{solar_val:,.0f}</div>
+                                        <div style='background: {net_color}; color: #000; padding: 4px; border-radius: 4px; text-align: center; font-size: 12px; font-weight: bold;'>{net_val:,.0f}</div>
+                                    </div>
+                                """
+                            st.markdown(rows_html, unsafe_allow_html=True)
+                            
+                            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
                             if st.button(f"View Chart for {date_obj.strftime('%m/%d/%Y')}", key=f"pjm_chart_{popup_date}"):
                                 chart_col1, chart_col2 = st.columns(2)
                                 with chart_col1:
@@ -1839,9 +1784,14 @@ def main():
                                     )
                                     st.plotly_chart(fig_ren, use_container_width=True)
                             if st.button("Close", key="close_pjm", type="primary", use_container_width=True):
+                                if 'pjm_dialog_active' in st.session_state:
+                                    del st.session_state['pjm_dialog_active']
                                 del st.session_state['pjm_popup_date']
                                 st.rerun()
                     show_pjm_dialog()
+                    # Clear the active flag after showing dialog so clicking outside will clean up
+                    if 'pjm_dialog_active' in st.session_state:
+                        del st.session_state['pjm_dialog_active']
 
                 st.markdown("---")
                 st.caption(f"Data last fetched: {met_fetch_time} | Auto-refresh every hour")
@@ -1851,7 +1801,7 @@ def main():
 
         # Tab 3 - Gas
         with tab3:
-            st.header("NG Futures")
+            st.header("Natural Gas Futures")
 
             chart_type = st.radio("Select Timeframe:", ["Daily", "Weekly"], horizontal=True)
 
@@ -1860,10 +1810,10 @@ def main():
 
                 if chart_type == "Daily":
                     data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                    chart_title = ""
+                    chart_title = "Natural Gas (NG=F) - Daily Candlestick Chart with 180-Day MA"
                 else:
                     data = yf.download(ticker, period="2y", interval="1wk", progress=False)
-                    chart_title = ""
+                    chart_title = "Natural Gas (NG=F) - Weekly Candlestick Chart with 180-Day MA"
 
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
@@ -1950,4 +1900,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
