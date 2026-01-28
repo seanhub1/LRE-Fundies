@@ -1851,7 +1851,7 @@ def main():
 
         # Tab 3 - Gas
         with tab3:
-            st.header("Natural Gas Futures")
+            st.header("NG Futures")
 
             chart_type = st.radio("Select Timeframe:", ["Daily", "Weekly"], horizontal=True)
 
@@ -1860,10 +1860,10 @@ def main():
 
                 if chart_type == "Daily":
                     data = yf.download(ticker, period="6mo", interval="1d", progress=False)
-                    chart_title = "Natural Gas (NG=F) - Daily Candlestick Chart with 180-Day MA"
+                    chart_title = ""
                 else:
                     data = yf.download(ticker, period="2y", interval="1wk", progress=False)
-                    chart_title = "Natural Gas (NG=F) - Weekly Candlestick Chart with 180-Day MA"
+                    chart_title = ""
 
                 if isinstance(data.columns, pd.MultiIndex):
                     data.columns = data.columns.get_level_values(0)
@@ -1950,3 +1950,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
