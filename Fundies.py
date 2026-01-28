@@ -23,16 +23,20 @@ st.markdown("""
         background-color: #0e1117;
         color: #fafafa;
     }
+    [data-testid="stHeader"] {
+        background-color: #0e1117;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #0e1117;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# Load environment variables
-dotenv_file = "C:/Users/Sean.Lewis/Documents/Forecast/Forecast Login.env.txt"
-load_dotenv(dotenv_file)
+# Load from Streamlit secrets (no .env file needed)
 baseurl = "https://api-markets.meteologica.com/api/v1/"
 
-# Cache file location
-CACHE_FILE = Path("C:/Users/Sean.Lewis/Documents/Forecast/historical_cache.json")
+# Cache file location (use temp directory for cloud)
+CACHE_FILE = Path("/tmp/historical_cache.json")
 
 def make_get_request(endpoint, query_params):
     url = baseurl + endpoint
@@ -59,10 +63,8 @@ def refresh_token():
 def get_or_refresh_stored_token():
     token = os.getenv("API_TOKEN")
     if not token or time.time() > jwt.decode(token, options={"verify_signature": False})["exp"]:
-        user = os.getenv("API_USER")
-        password = os.getenv("API_PASSWORD")
-        if not user or not password:
-            raise RuntimeError("Missing API_USER or API_PASSWORD in .env")
+        user = st.secrets["meteologica"]["API_USER"]
+        password = st.secrets["meteologica"]["API_PASSWORD"]
         new_token = get_new_token(user, password)
         os.environ["API_TOKEN"] = new_token
         return new_token
@@ -86,9 +88,9 @@ def get_content_data(content_id):
     return None
 
 def ercot_token():
-    uid = 'sean.lewis@leewardenergy.com'
-    pwd = 'Football09!!1999!!'
-    SUBSCRIPTION = '66ee472c949c4f87b9ce4d7ca80a01af'
+    uid = st.secrets["ercot"]["username"]
+    pwd = st.secrets["ercot"]["password"]
+    SUBSCRIPTION = st.secrets["ercot"]["subscription"]
     AUTH_URL = (
         f"https://ercotb2c.b2clogin.com/ercotb2c.onmicrosoft.com/B2C_1_PUBAPI-ROPC-FLOW/oauth2/v2.0/"
         f"token?username={uid}&password={pwd}"
@@ -106,9 +108,9 @@ def ercot_token():
     return None
 
 def ercot_token_outages():
-    uid = 'sean.lewis@leewardenergy.com'
-    pwd = 'Football09!!1999!!'
-    SUBSCRIPTION = '66ee472c949c4f87b9ce4d7ca80a01af'
+    uid = st.secrets["ercot"]["username"]
+    pwd = st.secrets["ercot"]["password"]
+    SUBSCRIPTION = st.secrets["ercot"]["subscription"]
     AUTH_URL = (
         f"https://ercotb2c.b2clogin.com/ercotb2c.onmicrosoft.com/"
         f"B2C_1_PUBAPI-ROPC-FLOW/oauth2/v2.0/token"
@@ -146,7 +148,7 @@ def fetch_outage_data_robust(url, headers, max_retries=3):
 # PJM API Functions
 def pjm_api_call(url, max_retries=3):
     pjm_headers = {
-        'Ocp-Apim-Subscription-Key': 'c766b2b33a884e3f94b202e7446eb3ea',
+        'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
     }
     for attempt in range(max_retries):
         try:
@@ -1948,4 +1950,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
