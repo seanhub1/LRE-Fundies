@@ -780,6 +780,10 @@ def get_color_for_value(value, min_val, max_val, reverse=False):
 
 def check_password():
     
+    
+    if st.query_params.get("auth") == "1":
+        return
+    
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     
@@ -791,9 +795,10 @@ def check_password():
             if submitted:
                 if password == st.secrets.get("app", {}).get("password", ""):
                     st.session_state.authenticated = True
+                    st.query_params["auth"] = "1"
                     st.rerun()
                 else:
-                    st.error("That's wrong")
+                    st.error("Wrong password")
         st.stop()
 
 def main():
@@ -2012,6 +2017,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
