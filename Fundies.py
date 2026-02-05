@@ -12,6 +12,9 @@ import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from io import BytesIO
+import xml.etree.ElementTree as ET
+from html import unescape
+import re
 
 
 st.set_page_config(page_title="Fundies", layout="wide", initial_sidebar_state="collapsed")
@@ -801,11 +804,130 @@ def check_password():
                     st.error("Wrong password")
         st.stop()
 
+# ── News RSS Functions ──
+NEWS_CATEGORIES = {
+    "ERCOT": {
+        "color": "#22c55e",
+        "bg": "rgba(34,197,94,0.12)",
+        "queries": [
+            "ERCOT electricity market",
+            "ERCOT grid Texas power",
+            "Texas electricity load demand",
+        ],
+    },
+    "PJM": {
+        "color": "#3b82f6",
+        "bg": "rgba(59,130,246,0.12)",
+        "queries": [
+            "PJM electricity market",
+            "PJM power grid capacity",
+            "PJM interconnection load",
+        ],
+    },
+    "Gas": {
+        "color": "#f97316",
+        "bg": "rgba(249,115,22,0.12)",
+        "queries": [
+            "natural gas prices Henry Hub",
+            "natural gas storage report",
+            "natural gas market news",
+        ],
+    },
+    "Pipeline": {
+        "color": "#a855f7",
+        "bg": "rgba(168,85,247,0.12)",
+        "queries": [
+            "natural gas pipeline FERC",
+            "Permian Basin pipeline capacity",
+            "gas pipeline maintenance outage",
+        ],
+    },
+}
+
+@st.cache_data(ttl=3600)
+def fetch_google_rss_news(query, category, _cache_time):
+    """Fetch news from Google News RSS for a given query."""
+    articles = []
+    try:
+        rss_url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(rss_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.ok:
+            root = ET.fromstring(resp.content)
+            channel = root.find("channel")
+            if channel is not None:
+                for item in channel.findall("item")[:5]:
+                    title_el = item.find("title")
+                    link_el = item.find("link")
+                    pub_el = item.find("pubDate")
+                    source_el = item.find("source")
+                    title = unescape(title_el.text) if title_el is not None and title_el.text else ""
+                    link = link_el.text if link_el is not None and link_el.text else ""
+                    pub_date = pub_el.text if pub_el is not None and pub_el.text else ""
+                    source = source_el.text if source_el is not None and source_el.text else ""
+                    if title:
+                        articles.append({
+                            "category": category,
+                            "headline": title,
+                            "link": link,
+                            "source": source,
+                            "pubDate": pub_date,
+                        })
+    except Exception:
+        pass
+    return articles
+
+def parse_rss_date(date_str):
+    """Parse RSS pubDate string to datetime."""
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(date_str)
+    except Exception:
+        return datetime.min.replace(tzinfo=None)
+
+def format_relative_time(dt):
+    """Format a datetime as relative time string."""
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo('UTC'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo('UTC'))
+        diff = now - dt
+        seconds = int(diff.total_seconds())
+        if seconds < 60:
+            return "just now"
+        elif seconds < 3600:
+            m = seconds // 60
+            return f"{m}m ago"
+        elif seconds < 86400:
+            h = seconds // 3600
+            return f"{h}h ago"
+        else:
+            d = seconds // 86400
+            return f"{d}d ago"
+    except Exception:
+        return ""
+
+@st.cache_data(ttl=3600)
+def fetch_all_news(cache_time):
+    """Fetch all news across all categories."""
+    all_articles = []
+    seen_headlines = set()
+    for category, config in NEWS_CATEGORIES.items():
+        for query in config["queries"]:
+            articles = fetch_google_rss_news(query, category, cache_time)
+            for article in articles:
+                clean = re.sub(r'\s+', ' ', article["headline"].strip().lower())
+                if clean not in seen_headlines:
+                    seen_headlines.add(clean)
+                    all_articles.append(article)
+    all_articles.sort(key=lambda x: parse_rss_date(x.get("pubDate", "")), reverse=True)
+    return all_articles
+
 def main():
     check_password()
     st.title("Fundies")
     try:
-        tab1, tab2, tab3 = st.tabs(["ERCOT Weekly", "PJM Weekly", "Gas"])
+        tab1, tab2, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "Gas", "News"])
         with st.spinner("Loading forecast data..."):
             cache_time = get_cache_time()
             result = fetch_forecast_data(cache_time)
@@ -2010,6 +2132,157 @@ def main():
             except Exception as e:
                 st.error(f"Error fetching Natural Gas data: {str(e)}")
 
+        # Tab 4 - News
+        with tab4:
+            st.header("Market News")
+
+            #  news
+            with st.spinner("Loading news feeds..."):
+                all_articles = fetch_all_news(cache_time)
+
+            # Filter chips
+            cat_options = ["All", "ERCOT", "PJM", " Nat Gas", "Pipeline"]
+            selected_cat = st.radio(
+                "Filter by market:",
+                cat_options,
+                horizontal=True,
+                key="news_filter",
+                label_visibility="collapsed",
+            )
+
+            if selected_cat != "All":
+                filtered_articles = [a for a in all_articles if a["category"] == selected_cat]
+            else:
+                filtered_articles = all_articles
+
+            if not filtered_articles:
+                st.info("No news articles found. Try a different filter or check back later.")
+            else:
+                # Category color
+                cat_chip_css = ""
+                for cat, cfg in NEWS_CATEGORIES.items():
+                    safe_cat = cat.lower().replace(" ", "-")
+                    cat_chip_css += f"""
+                        .news-cat-{safe_cat} {{
+                            background: {cfg['bg']};
+                            color: {cfg['color']};
+                            font-size: 11px;
+                            font-weight: 700;
+                            padding: 2px 10px;
+                            border-radius: 4px;
+                            display: inline-block;
+                            font-family: monospace;
+                            letter-spacing: 0.3px;
+                        }}
+                    """
+
+                st.markdown(f"""
+                    <style>
+                    {cat_chip_css}
+                    .news-table {{
+                        width: 100%;
+                        border: 1px solid rgba(255,255,255,0.08);
+                        border-radius: 8px;
+                        overflow: hidden;
+                        border-collapse: separate;
+                        border-spacing: 0;
+                    }}
+                    .news-table-header {{
+                        display: grid;
+                        grid-template-columns: 80px 1fr 160px 80px;
+                        padding: 10px 16px;
+                        background: rgba(255,255,255,0.04);
+                        font-size: 11px;
+                        color: #64748b;
+                        font-weight: 700;
+                        text-transform: uppercase;
+                        letter-spacing: 0.8px;
+                        font-family: monospace;
+                        border-bottom: 1px solid rgba(255,255,255,0.08);
+                    }}
+                    .news-row {{
+                        display: grid;
+                        grid-template-columns: 80px 1fr 160px 80px;
+                        padding: 11px 16px;
+                        align-items: center;
+                        border-bottom: 1px solid rgba(255,255,255,0.04);
+                        transition: background 0.15s;
+                    }}
+                    .news-row:hover {{
+                        background: rgba(255,255,255,0.03);
+                    }}
+                    .news-row-even {{
+                        background: rgba(255,255,255,0.015);
+                    }}
+                    .news-row a {{
+                        color: #e2e8f0;
+                        text-decoration: none;
+                        font-size: 13.5px;
+                        font-weight: 500;
+                        font-family: monospace;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        display: block;
+                        padding-right: 16px;
+                    }}
+                    .news-row a:hover {{
+                        color: #60a5fa;
+                        text-decoration: underline;
+                    }}
+                    .news-source {{
+                        font-size: 12px;
+                        color: #64748b;
+                        font-family: monospace;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }}
+                    .news-time {{
+                        font-size: 12px;
+                        color: #525f7a;
+                        text-align: right;
+                        font-family: monospace;
+                    }}
+                    </style>
+                """, unsafe_allow_html=True)
+
+                # table header
+                header_html = """
+                <div class="news-table">
+                    <div class="news-table-header">
+                        <span>Market</span>
+                        <span>Headline</span>
+                        <span>Source</span>
+                        <span style="text-align:right;">Time</span>
+                    </div>
+                """
+
+                
+                rows_html = ""
+                for i, article in enumerate(filtered_articles):
+                    cat = article["category"]
+                    safe_cat = cat.lower().replace(" ", "-")
+                    headline = article["headline"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+                    link = article.get("link", "#")
+                    source = article.get("source", "").replace('<', '&lt;').replace('>', '&gt;')
+                    pub_date = article.get("pubDate", "")
+                    dt = parse_rss_date(pub_date)
+                    rel_time = format_relative_time(dt)
+
+                    row_class = "news-row news-row-even" if i % 2 == 0 else "news-row"
+                    rows_html += f"""
+                    <div class="{row_class}">
+                        <span><span class="news-cat-{safe_cat}">{cat}</span></span>
+                        <a href="{link}" target="_blank" title="{headline}">{headline}</a>
+                        <span class="news-source">{source}</span>
+                        <span class="news-time">{rel_time}</span>
+                    </div>
+                    """
+
+                st.markdown(header_html + rows_html + "</div>", unsafe_allow_html=True)
+                st.caption(f"Showing {len(filtered_articles)} articles | Refreshes hourly")
+
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         import traceback
@@ -2017,9 +2290,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
