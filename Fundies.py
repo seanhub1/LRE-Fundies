@@ -810,39 +810,80 @@ NEWS_CATEGORIES = {
         "color": "#22c55e",
         "bg": "rgba(34,197,94,0.12)",
         "queries": [
-            "ERCOT power market when:7d",
-            "ERCOT grid Texas electricity when:7d",
-            "Texas power load energy when:7d",
+            "ERCOT power market when:3d",
+            "ERCOT grid Texas electricity when:3d",
+            "Texas power load energy when:3d",
+            "ERCOT datacenter load Texas when:3d",
+            "ERCOT interconnection queue generator when:3d",
+            "ERCOT plant retirement Texas generation when:3d",
+            "PUCT Texas electricity regulation when:3d",
         ],
     },
     "PJM": {
         "color": "#3b82f6",
         "bg": "rgba(59,130,246,0.12)",
         "queries": [
-            "PJM power market when:7d",
-            "PJM grid capacity electricity when:7d",
-            "PJM load energy market when:7d",
+            "PJM power market when:3d",
+            "PJM grid capacity electricity when:3d",
+            "PJM load energy market when:3d",
+            "PJM datacenter load growth when:3d",
+            "PJM interconnection queue generator when:3d",
+            "PJM plant retirement generation when:3d",
+            "FERC PJM regulation order when:3d",
         ],
     },
     "Gas": {
         "color": "#f97316",
         "bg": "rgba(249,115,22,0.12)",
         "queries": [
-            "natural gas prices when:7d",
-            "natural gas storage report when:7d",
-            "Henry Hub natural gas market when:7d",
+            "natural gas prices US when:3d",
+            "natural gas storage report when:3d",
+            "Henry Hub natural gas market when:3d",
+            "US natural gas production when:3d",
+            "US LNG export terminal when:3d",
         ],
     },
     "Pipeline": {
         "color": "#a855f7",
         "bg": "rgba(168,85,247,0.12)",
         "queries": [
-            "natural gas pipeline when:7d",
-            "Permian Basin pipeline when:7d",
-            "gas pipeline FERC when:7d",
+            "US natural gas pipeline when:3d",
+            "Permian Basin pipeline when:3d",
+            "gas pipeline FERC US when:3d",
+            "pipeline maintenance outage US when:3d",
+        ],
+    },
+    "Load": {
+        "color": "#eab308",
+        "bg": "rgba(234,179,8,0.12)",
+        "queries": [
+            "datacenter power demand US grid when:3d",
+            "large load interconnection electricity US when:3d",
+            "AI datacenter electricity demand when:3d",
+        ],
+    },
+    "Regulatory": {
+        "color": "#ef4444",
+        "bg": "rgba(239,68,68,0.12)",
+        "queries": [
+            "FERC electricity regulation order when:3d",
+            "NERC reliability standard when:3d",
+            "US power plant retirement announcement when:3d",
+            "new generation capacity US power when:3d",
         ],
     },
 }
+
+# Keywords to filter out European/non-US news
+EXCLUDE_KEYWORDS = [
+    "europe", "european", "EU ", "brexit", "uk power", "uk grid", "uk energy",
+    "ofgem", "national grid uk", "nord stream", "german", "germany", "france",
+    "spain", "italy", "netherlands", "norway", "denmark", "sweden", "poland",
+    "austria", "belgium", "ireland", "scotland", "wales", "england",
+    "australia", "india", "china", "japan", "korea", "asia",
+    "african", "africa", "middle east", "dubai", "saudi",
+    "entso-e", "epex", "nordpool",
+]
 
 @st.cache_data(ttl=3600)
 def fetch_google_rss_news(query, category, _cache_time):
@@ -920,6 +961,25 @@ def fetch_all_news(cache_time):
                 if clean not in seen_headlines:
                     seen_headlines.add(clean)
                     all_articles.append(article)
+
+    # Hard filter: drop articles older than 3 days
+    from zoneinfo import ZoneInfo
+    cutoff = datetime.now(ZoneInfo('UTC')) - timedelta(days=3)
+    all_articles = [
+        a for a in all_articles
+        if parse_rss_date(a.get("pubDate", "")) >= cutoff
+    ]
+
+    # Filter out non-US / European news
+    def is_us_relevant(article):
+        text = (article.get("headline", "") + " " + article.get("source", "")).lower()
+        for kw in EXCLUDE_KEYWORDS:
+            if kw.lower() in text:
+                return False
+        return True
+
+    all_articles = [a for a in all_articles if is_us_relevant(a)]
+
     all_articles.sort(key=lambda x: parse_rss_date(x.get("pubDate", "")), reverse=True)
     return all_articles
 
@@ -2141,7 +2201,7 @@ def main():
                 all_articles = fetch_all_news(cache_time)
 
             # Filter chips
-            cat_options = ["All", "ERCOT", "PJM", "Gas", "Pipeline"]
+            cat_options = ["All", "ERCOT", "PJM", "Gas", "Pipeline", "Load", "Regulatory"]
             selected_cat = st.radio(
                 "Filter by market:",
                 cat_options,
@@ -2156,7 +2216,7 @@ def main():
                 filtered_articles = all_articles
 
             if not filtered_articles:
-                st.info("No news articles found")
+                st.info("No news articles found. Try a different filter or check back later.")
             else:
                 # Header row
                 hdr1, hdr2, hdr3, hdr4 = st.columns([1, 6, 2, 1])
