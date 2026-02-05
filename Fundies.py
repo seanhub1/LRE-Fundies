@@ -810,36 +810,36 @@ NEWS_CATEGORIES = {
         "color": "#22c55e",
         "bg": "rgba(34,197,94,0.12)",
         "queries": [
-            "ERCOT electricity market",
-            "ERCOT grid Texas power",
-            "Texas electricity load demand",
+            "ERCOT power market when:7d",
+            "ERCOT grid Texas electricity when:7d",
+            "Texas power load energy when:7d",
         ],
     },
     "PJM": {
         "color": "#3b82f6",
         "bg": "rgba(59,130,246,0.12)",
         "queries": [
-            "PJM electricity market",
-            "PJM power grid capacity",
-            "PJM interconnection load",
+            "PJM power market when:7d",
+            "PJM grid capacity electricity when:7d",
+            "PJM load energy market when:7d",
         ],
     },
     "Gas": {
         "color": "#f97316",
         "bg": "rgba(249,115,22,0.12)",
         "queries": [
-            "natural gas prices Henry Hub",
-            "natural gas storage report",
-            "natural gas market news",
+            "natural gas prices when:7d",
+            "natural gas storage report when:7d",
+            "Henry Hub natural gas market when:7d",
         ],
     },
     "Pipeline": {
         "color": "#a855f7",
         "bg": "rgba(168,85,247,0.12)",
         "queries": [
-            "natural gas pipeline FERC",
-            "Permian Basin pipeline capacity",
-            "gas pipeline maintenance outage",
+            "natural gas pipeline when:7d",
+            "Permian Basin pipeline when:7d",
+            "gas pipeline FERC when:7d",
         ],
     },
 }
@@ -2134,14 +2134,14 @@ def main():
 
         # Tab 4 - News
         with tab4:
-            st.header("Market News")
+            st.header("Energy Market News")
 
-            #  news
+            # Fetch news
             with st.spinner("Loading news feeds..."):
                 all_articles = fetch_all_news(cache_time)
 
             # Filter chips
-            cat_options = ["All", "ERCOT", "PJM", " Nat Gas", "Pipeline"]
+            cat_options = ["All", "ERCOT", "PJM", "Gas", "Pipeline"]
             selected_cat = st.radio(
                 "Filter by market:",
                 cat_options,
@@ -2156,131 +2156,46 @@ def main():
                 filtered_articles = all_articles
 
             if not filtered_articles:
-                st.info("No news articles found. Try a different filter or check back later.")
+                st.info("No news articles found")
             else:
-                # Category color
-                cat_chip_css = ""
-                for cat, cfg in NEWS_CATEGORIES.items():
-                    safe_cat = cat.lower().replace(" ", "-")
-                    cat_chip_css += f"""
-                        .news-cat-{safe_cat} {{
-                            background: {cfg['bg']};
-                            color: {cfg['color']};
-                            font-size: 11px;
-                            font-weight: 700;
-                            padding: 2px 10px;
-                            border-radius: 4px;
-                            display: inline-block;
-                            font-family: monospace;
-                            letter-spacing: 0.3px;
-                        }}
-                    """
+                # Header row
+                hdr1, hdr2, hdr3, hdr4 = st.columns([1, 6, 2, 1])
+                hdr1.markdown("**MARKET**")
+                hdr2.markdown("**HEADLINE**")
+                hdr3.markdown("**SOURCE**")
+                hdr4.markdown("**TIME**")
+                st.divider()
 
-                st.markdown(f"""
-                    <style>
-                    {cat_chip_css}
-                    .news-table {{
-                        width: 100%;
-                        border: 1px solid rgba(255,255,255,0.08);
-                        border-radius: 8px;
-                        overflow: hidden;
-                        border-collapse: separate;
-                        border-spacing: 0;
-                    }}
-                    .news-table-header {{
-                        display: grid;
-                        grid-template-columns: 80px 1fr 160px 80px;
-                        padding: 10px 16px;
-                        background: rgba(255,255,255,0.04);
-                        font-size: 11px;
-                        color: #64748b;
-                        font-weight: 700;
-                        text-transform: uppercase;
-                        letter-spacing: 0.8px;
-                        font-family: monospace;
-                        border-bottom: 1px solid rgba(255,255,255,0.08);
-                    }}
-                    .news-row {{
-                        display: grid;
-                        grid-template-columns: 80px 1fr 160px 80px;
-                        padding: 11px 16px;
-                        align-items: center;
-                        border-bottom: 1px solid rgba(255,255,255,0.04);
-                        transition: background 0.15s;
-                    }}
-                    .news-row:hover {{
-                        background: rgba(255,255,255,0.03);
-                    }}
-                    .news-row-even {{
-                        background: rgba(255,255,255,0.015);
-                    }}
-                    .news-row a {{
-                        color: #e2e8f0;
-                        text-decoration: none;
-                        font-size: 13.5px;
-                        font-weight: 500;
-                        font-family: monospace;
-                        white-space: nowrap;
-                        overflow: hidden;
-                        text-overflow: ellipsis;
-                        display: block;
-                        padding-right: 16px;
-                    }}
-                    .news-row a:hover {{
-                        color: #60a5fa;
-                        text-decoration: underline;
-                    }}
-                    .news-source {{
-                        font-size: 12px;
-                        color: #64748b;
-                        font-family: monospace;
-                        white-space: nowrap;
-                        overflow: hidden;
-                        text-overflow: ellipsis;
-                    }}
-                    .news-time {{
-                        font-size: 12px;
-                        color: #525f7a;
-                        text-align: right;
-                        font-family: monospace;
-                    }}
-                    </style>
-                """, unsafe_allow_html=True)
-
-                # table header
-                header_html = """
-                <div class="news-table">
-                    <div class="news-table-header">
-                        <span>Market</span>
-                        <span>Headline</span>
-                        <span>Source</span>
-                        <span style="text-align:right;">Time</span>
-                    </div>
-                """
-
-                
-                rows_html = ""
                 for i, article in enumerate(filtered_articles):
                     cat = article["category"]
-                    safe_cat = cat.lower().replace(" ", "-")
-                    headline = article["headline"].replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+                    cat_color = NEWS_CATEGORIES[cat]["color"]
+                    headline = article["headline"]
                     link = article.get("link", "#")
-                    source = article.get("source", "").replace('<', '&lt;').replace('>', '&gt;')
+                    source = article.get("source", "")
                     pub_date = article.get("pubDate", "")
                     dt = parse_rss_date(pub_date)
                     rel_time = format_relative_time(dt)
 
-                    row_class = "news-row news-row-even" if i % 2 == 0 else "news-row"
-                    rows_html += f"""
-                    <div class="{row_class}">
-                        <span><span class="news-cat-{safe_cat}">{cat}</span></span>
-                        <a href="{link}" target="_blank" title="{headline}">{headline}</a>
-                        <span class="news-source">{source}</span>
-                        <span class="news-time">{rel_time}</span>
-                    </div>
-                    """
+                    col1, col2, col3, col4 = st.columns([1, 6, 2, 1])
+                    with col1:
+                        st.markdown(
+                            f'<span style="background:{NEWS_CATEGORIES[cat]["bg"]};color:{cat_color};'
+                            f'font-size:11px;font-weight:700;padding:3px 10px;border-radius:4px;'
+                            f'font-family:monospace;">{cat}</span>',
+                            unsafe_allow_html=True,
+                        )
+                    with col2:
+                        st.markdown(
+                            f'<a href="{link}" target="_blank" style="color:#e2e8f0;text-decoration:none;'
+                            f'font-size:13.5px;font-weight:500;font-family:monospace;">{headline}</a>',
+                            unsafe_allow_html=True,
+                        )
+                    with col3:
+                        st.caption(source)
+                    with col4:
+                        st.caption(rel_time)
 
-                st.markdown(header_html + rows_html + "</div>", unsafe_allow_html=True)
+                st.markdown("---")
                 st.caption(f"Showing {len(filtered_articles)} articles | Refreshes hourly")
 
     except Exception as e:
