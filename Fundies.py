@@ -817,6 +817,8 @@ NEWS_CATEGORIES = {
             "ERCOT interconnection queue generator when:3d",
             "ERCOT plant retirement Texas generation when:3d",
             "PUCT Texas electricity regulation when:3d",
+            "ERCOT North Hub power price ICE when:3d",
+            "ERCOT wholesale electricity price when:3d",
         ],
     },
     "PJM": {
@@ -830,6 +832,8 @@ NEWS_CATEGORIES = {
             "PJM interconnection queue generator when:3d",
             "PJM plant retirement generation when:3d",
             "FERC PJM regulation order when:3d",
+            "PJM West Hub power price ICE when:3d",
+            "PJM wholesale electricity price when:3d",
         ],
     },
     "Gas": {
@@ -841,6 +845,7 @@ NEWS_CATEGORIES = {
             "Henry Hub natural gas market when:3d",
             "US natural gas production when:3d",
             "US LNG export terminal when:3d",
+            "NYMEX natural gas futures when:3d",
         ],
     },
     "Pipeline": {
@@ -851,6 +856,11 @@ NEWS_CATEGORIES = {
             "Permian Basin pipeline when:3d",
             "gas pipeline FERC US when:3d",
             "pipeline maintenance outage US when:3d",
+            "gas pipeline freeze off when:3d",
+            "gas pipeline compressor outage when:3d",
+            "pipeline operational flow order when:3d",
+            "natural gas freeze off production when:3d",
+            "pipeline force majeure natural gas when:3d",
         ],
     },
     "Load": {
@@ -860,6 +870,7 @@ NEWS_CATEGORIES = {
             "datacenter power demand US grid when:3d",
             "large load interconnection electricity US when:3d",
             "AI datacenter electricity demand when:3d",
+            "datacenter power ERCOT PJM when:3d",
         ],
     },
     "Regulatory": {
@@ -870,6 +881,7 @@ NEWS_CATEGORIES = {
             "NERC reliability standard when:3d",
             "US power plant retirement announcement when:3d",
             "new generation capacity US power when:3d",
+            "PUCT FERC electricity rule when:3d",
         ],
     },
 }
