@@ -897,7 +897,7 @@ EXCLUDE_KEYWORDS = [
     "entso-e", "epex", "nordpool",
 ]
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def fetch_google_rss_news(query, category, _cache_time):
     """Fetch news from Google News RSS for a given query."""
     articles = []
@@ -960,7 +960,7 @@ def format_relative_time(dt):
     except Exception:
         return ""
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def fetch_all_news(cache_time):
     """Fetch all news across all categories."""
     all_articles = []
@@ -2277,3 +2277,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
