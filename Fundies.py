@@ -810,92 +810,124 @@ NEWS_CATEGORIES = {
         "color": "#22c55e",
         "bg": "rgba(34,197,94,0.12)",
         "queries": [
-            "ERCOT power market when:3d",
-            "ERCOT grid Texas electricity when:3d",
-            "Texas power load energy when:3d",
-            "ERCOT datacenter load Texas when:3d",
-            "ERCOT interconnection queue generator when:3d",
-            "ERCOT plant retirement Texas generation when:3d",
-            "PUCT Texas electricity regulation when:3d",
-            "ERCOT North Hub power price ICE when:3d",
-            "ERCOT wholesale electricity price when:3d",
+            "ERCOT grid operations when:3d",
+            "ERCOT load forecast record demand when:3d",
+            "ERCOT generation outage forced planned when:3d",
+            "ERCOT interconnection queue MW when:3d",
+            "ERCOT plant retirement deactivation closure when:3d",
+            "ERCOT datacenter large load interconnection when:3d",
+            "PUCT rulemaking ERCOT reliability when:3d",
+            "Texas grid reserve margin reliability when:3d",
+            "ERCOT conservation appeal emergency when:3d",
+            "ERCOT transmission constraint congestion when:3d",
         ],
     },
     "PJM": {
         "color": "#3b82f6",
         "bg": "rgba(59,130,246,0.12)",
         "queries": [
-            "PJM power market when:3d",
-            "PJM grid capacity electricity when:3d",
-            "PJM load energy market when:3d",
-            "PJM datacenter load growth when:3d",
-            "PJM interconnection queue generator when:3d",
-            "PJM plant retirement generation when:3d",
-            "FERC PJM regulation order when:3d",
-            "PJM West Hub power price ICE when:3d",
-            "PJM wholesale electricity price when:3d",
+            "PJM grid operations reliability when:3d",
+            "PJM capacity auction results when:3d",
+            "PJM interconnection queue MW when:3d",
+            "PJM plant retirement deactivation closure when:3d",
+            "PJM datacenter large load interconnection when:3d",
+            "PJM generation outage forced planned when:3d",
+            "PJM transmission constraint congestion when:3d",
+            "PJM reserve margin reliability when:3d",
         ],
     },
     "Gas": {
         "color": "#f97316",
         "bg": "rgba(249,115,22,0.12)",
         "queries": [
-            "natural gas prices US when:3d",
-            "natural gas storage report when:3d",
-            "Henry Hub natural gas market when:3d",
-            "US natural gas production when:3d",
-            "US LNG export terminal when:3d",
-            "NYMEX natural gas futures when:3d",
+            "EIA natural gas storage report injection withdrawal when:3d",
+            "natural gas production Permian Haynesville Appalachia when:3d",
+            "LNG export feed gas terminal when:3d",
+            "natural gas pipeline flow nomination when:3d",
+            "Henry Hub natural gas spot price when:3d",
+            "natural gas power burn demand when:3d",
         ],
     },
     "Pipeline": {
         "color": "#a855f7",
         "bg": "rgba(168,85,247,0.12)",
         "queries": [
-            "US natural gas pipeline when:3d",
-            "Permian Basin pipeline when:3d",
-            "gas pipeline FERC US when:3d",
-            "pipeline maintenance outage US when:3d",
-            "gas pipeline freeze off when:3d",
-            "gas pipeline compressor outage when:3d",
-            "pipeline operational flow order when:3d",
-            "natural gas freeze off production when:3d",
+            "pipeline maintenance outage natural gas when:3d",
+            "operational flow order OFO natural gas when:3d",
             "pipeline force majeure natural gas when:3d",
+            "natural gas freeze off production curtailment when:3d",
+            "gas pipeline compressor station outage when:3d",
+            "Transco pipeline capacity constraint when:3d",
+            "gas pipeline FERC certificate construction when:3d",
         ],
     },
     "Load": {
         "color": "#eab308",
         "bg": "rgba(234,179,8,0.12)",
         "queries": [
-            "datacenter power demand US grid when:3d",
-            "large load interconnection electricity US when:3d",
-            "AI datacenter electricity demand when:3d",
-            "datacenter power ERCOT PJM when:3d",
+            "datacenter power interconnection ERCOT PJM MW when:3d",
+            "datacenter electricity demand gigawatt grid when:3d",
+            "large load industrial power grid interconnection when:3d",
+            "behind the meter generation datacenter when:3d",
         ],
     },
     "Regulatory": {
         "color": "#ef4444",
         "bg": "rgba(239,68,68,0.12)",
         "queries": [
-            "FERC electricity regulation order when:3d",
-            "NERC reliability standard when:3d",
-            "US power plant retirement announcement when:3d",
-            "new generation capacity US power when:3d",
-            "PUCT FERC electricity rule when:3d",
+            "FERC order rulemaking transmission generator when:3d",
+            "NERC reliability standard grid when:3d",
+            "power plant retirement closure MW when:3d",
+            "new generation capacity MW commercial operation when:3d",
+            "PUCT rulemaking reliability Texas when:3d",
+            "EPA power plant emission rule when:3d",
         ],
     },
 }
 
-# Keywords to filter out European/non-US news
+# Keywords to filter out European/non-US news, financial noise, and political noise
 EXCLUDE_KEYWORDS = [
+    # Geographic - Europe
     "europe", "european", "EU ", "brexit", "uk power", "uk grid", "uk energy",
     "ofgem", "national grid uk", "nord stream", "german", "germany", "france",
     "spain", "italy", "netherlands", "norway", "denmark", "sweden", "poland",
     "austria", "belgium", "ireland", "scotland", "wales", "england",
+    # Geographic - non-US
     "australia", "india", "china", "japan", "korea", "asia",
     "african", "africa", "middle east", "dubai", "saudi",
     "entso-e", "epex", "nordpool",
+    # Financial / Investment noise
+    "stock", "stocks", "shares", "dividend", "earnings call",
+    "portfolio", "investor", "investing", "investment advice",
+    "buy rating", "sell rating", "hold rating", "outperform", "underperform",
+    "price target", "analyst rating", "wall street", "hedge fund",
+    "ETF", "mutual fund", "nasdaq", "dow jones", "S&P 500",
+    "market cap", "IPO ", "bull market", "bear market",
+    "retirement savings", "401k", "brokerage",
+    "best stocks", "top stocks", "stocks to buy", "should you buy",
+    "millionaire", "passive income", "financial freedom",
+    # Political noise (not regulatory)
+    "trump vs", "biden vs", "election poll", "campaign trail",
+    "impeach", "indictment", "classified documents",
+    # Clickbait / crypto
+    "you won't believe", "shocking", "one simple trick",
+    "crypto", "bitcoin", "ethereum", "blockchain",
 ]
+
+# Sources that are almost always financial noise, not operational energy news
+EXCLUDE_SOURCES = {
+    "the motley fool", "motley fool", "fool.com",
+    "seeking alpha", "seekingalpha",
+    "investopedia", "investor's business daily",
+    "benzinga", "zacks", "zacks investment",
+    "tipranks", "marketbeat", "stockanalysis",
+    "yahoo finance", "the street", "thestreet",
+    "24/7 wall st", "247wallst",
+    "insidermonkey", "insider monkey",
+    "simply wall st",
+    "barron's", "kiplinger",
+    "gobankingrates", "bankrate",
+}
 
 @st.cache_data(ttl=1800)
 def fetch_google_rss_news(query, category, _cache_time):
@@ -982,15 +1014,21 @@ def fetch_all_news(cache_time):
         if parse_rss_date(a.get("pubDate", "")) >= cutoff
     ]
 
-    # Filter out non-US / European news
-    def is_us_relevant(article):
+    # Filter out non-US / European / financial / political noise
+    def is_relevant(article):
         text = (article.get("headline", "") + " " + article.get("source", "")).lower()
+        # Exclude by keyword
         for kw in EXCLUDE_KEYWORDS:
             if kw.lower() in text:
                 return False
+        # Exclude by source
+        source_lower = article.get("source", "").lower().strip()
+        for exc_source in EXCLUDE_SOURCES:
+            if exc_source in source_lower:
+                return False
         return True
 
-    all_articles = [a for a in all_articles if is_us_relevant(a)]
+    all_articles = [a for a in all_articles if is_relevant(a)]
 
     all_articles.sort(key=lambda x: parse_rss_date(x.get("pubDate", "")), reverse=True)
     return all_articles
@@ -2277,4 +2315,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
