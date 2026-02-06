@@ -885,10 +885,51 @@ NEWS_CATEGORIES = {
     },
 }
 
+# ── X / Twitter Feeds via Nitter RSS ──
+# These accounts post real-time operational power/gas market updates
+X_FEEDS = {
+    "ERCOT_ISO": {
+        "category": "ERCOT",
+        "display_name": "ERCOT",
+        "description": "Official ERCOT grid operations",
+    },
+    "pjminterconnect": {
+        "category": "PJM",
+        "display_name": "PJM",
+        "description": "Official PJM operations",
+    },
+    "grid_status": {
+        "category": "ERCOT",
+        "display_name": "Grid Status",
+        "description": "Real-time grid data & analysis",
+    },
+    "douglewinenergy": {
+        "category": "ERCOT",
+        "display_name": "Doug Lewin",
+        "description": "Stoic Energy - TX grid commentary",
+    },
+    "EIAgov": {
+        "category": "Gas",
+        "display_name": "EIA",
+        "description": "US Energy Information Administration",
+    },
+    "NatGasWeather": {
+        "category": "Gas",
+        "display_name": "NatGasWeather",
+        "description": "Gas weather & demand forecasts",
+    },
+}
+
+# Nitter instances to try (public, may rotate)
+NITTER_INSTANCES = [
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.woodland.cafe",
+    "https://nitter.perennialte.ch",
+]
+
 # ── Relevance Filtering ──
-# Whitelist approach: article MUST contain at least one of these to pass.
-# This is the primary filter — if a headline doesn't mention something
-# a power/gas trader cares about, it gets dropped.
+# Whitelist: article MUST contain at least one of these to pass.
 RELEVANCE_KEYWORDS = {
     # ISOs / RTOs
     "ercot", "pjm", "caiso", "miso", "spp", "nyiso", "isone",
@@ -927,7 +968,7 @@ RELEVANCE_KEYWORDS = {
     "heat rate", "capacity auction", "capacity market",
 }
 
-# Sources that are financial noise — never operational energy news
+# Sources that are financial noise
 EXCLUDE_SOURCES = {
     "the motley fool", "motley fool",
     "seeking alpha", "seekingalpha",
@@ -969,9 +1010,84 @@ def fetch_google_rss_news(query, category, _cache_time):
                             "link": link,
                             "source": source,
                             "pubDate": pub_date,
+                            "is_x_post": False,
                         })
     except Exception:
         pass
+    return articles
+
+@st.cache_data(ttl=1800)
+def fetch_x_feed(username, feed_config, _cache_time):
+    """Fetch recent posts from an X/Twitter account via Nitter RSS or Google search fallback."""
+    articles = []
+    category = feed_config["category"]
+    display_name = feed_config["display_name"]
+
+    # Method 1: Try Nitter RSS instances
+    for nitter_base in NITTER_INSTANCES:
+        try:
+            rss_url = f"{nitter_base}/{username}/rss"
+            resp = requests.get(rss_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.ok and '<?xml' in resp.text[:100]:
+                root = ET.fromstring(resp.content)
+                channel = root.find("channel")
+                if channel is not None:
+                    for item in channel.findall("item")[:10]:
+                        title_el = item.find("title")
+                        link_el = item.find("link")
+                        pub_el = item.find("pubDate")
+                        title = unescape(title_el.text) if title_el is not None and title_el.text else ""
+                        link = link_el.text if link_el is not None and link_el.text else ""
+                        pub_date = pub_el.text if pub_el is not None and pub_el.text else ""
+                        # Clean up nitter links to point to x.com
+                        if link and nitter_base in link:
+                            link = link.replace(nitter_base, "https://x.com")
+                        # Truncate long tweets for headline display
+                        if len(title) > 200:
+                            title = title[:197] + "..."
+                        if title and title.strip() != "":
+                            articles.append({
+                                "category": category,
+                                "headline": title,
+                                "link": link if link else f"https://x.com/{username}",
+                                "source": f"@{username}",
+                                "pubDate": pub_date,
+                                "is_x_post": True,
+                            })
+                    if articles:
+                        return articles  # Got data, stop trying instances
+        except Exception:
+            continue
+
+    # Method 2: Fallback - Google News search for the account's posts
+    if not articles:
+        try:
+            query = f"from:{username} site:x.com when:3d"
+            rss_url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+            resp = requests.get(rss_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.ok:
+                root = ET.fromstring(resp.content)
+                channel = root.find("channel")
+                if channel is not None:
+                    for item in channel.findall("item")[:5]:
+                        title_el = item.find("title")
+                        link_el = item.find("link")
+                        pub_el = item.find("pubDate")
+                        title = unescape(title_el.text) if title_el is not None and title_el.text else ""
+                        link = link_el.text if link_el is not None and link_el.text else ""
+                        pub_date = pub_el.text if pub_el is not None and pub_el.text else ""
+                        if title:
+                            articles.append({
+                                "category": category,
+                                "headline": title,
+                                "link": link,
+                                "source": f"@{username}",
+                                "pubDate": pub_date,
+                                "is_x_post": True,
+                            })
+        except Exception:
+            pass
+
     return articles
 
 def parse_rss_date(date_str):
@@ -1007,9 +1123,11 @@ def format_relative_time(dt):
 
 @st.cache_data(ttl=1800)
 def fetch_all_news(cache_time):
-    """Fetch all news across all categories."""
+    """Fetch all news across all categories plus X feeds."""
     all_articles = []
     seen_headlines = set()
+
+    # 1. Google News RSS articles
     for category, config in NEWS_CATEGORIES.items():
         for query in config["queries"]:
             articles = fetch_google_rss_news(query, category, cache_time)
@@ -1018,6 +1136,17 @@ def fetch_all_news(cache_time):
                 if clean not in seen_headlines:
                     seen_headlines.add(clean)
                     all_articles.append(article)
+
+    # 2. X / Twitter feeds
+    x_articles = []
+    for username, feed_config in X_FEEDS.items():
+        posts = fetch_x_feed(username, feed_config, cache_time)
+        for post in posts:
+            clean = re.sub(r'\s+', ' ', post["headline"].strip().lower())
+            if clean not in seen_headlines:
+                seen_headlines.add(clean)
+                x_articles.append(post)
+    all_articles.extend(x_articles)
 
     # Hard filter: drop articles older than 3 days
     from zoneinfo import ZoneInfo
@@ -1028,7 +1157,11 @@ def fetch_all_news(cache_time):
     ]
 
     # Filter: whitelist relevance + source exclusion
+    # X posts from trusted accounts skip the whitelist (they're already curated)
     def is_relevant(article):
+        # Trusted X accounts always pass
+        if article.get("is_x_post", False):
+            return True
         text = (article.get("headline", "") + " " + article.get("source", "")).lower()
         # Hard exclude: financial noise sources
         source_lower = article.get("source", "").lower().strip()
@@ -1039,7 +1172,6 @@ def fetch_all_news(cache_time):
         for kw in RELEVANCE_KEYWORDS:
             if kw in text:
                 return True
-        # If no relevant keyword found, drop it
         return False
 
     all_articles = [a for a in all_articles if is_relevant(a)]
@@ -2264,8 +2396,8 @@ def main():
             with st.spinner("Loading news feeds..."):
                 all_articles = fetch_all_news(cache_time)
 
-            # Filter chips
-            cat_options = ["All", "ERCOT", "PJM", "Gas", "Pipeline", "Load", "Regulatory"]
+            # Filter chips - added X Feed option
+            cat_options = ["All", "ERCOT", "PJM", "Gas", "Pipeline", "Load", "Regulatory", "X Feed"]
             selected_cat = st.radio(
                 "Filter by market:",
                 cat_options,
@@ -2274,7 +2406,9 @@ def main():
                 label_visibility="collapsed",
             )
 
-            if selected_cat != "All":
+            if selected_cat == "X Feed":
+                filtered_articles = [a for a in all_articles if a.get("is_x_post", False)]
+            elif selected_cat != "All":
                 filtered_articles = [a for a in all_articles if a["category"] == selected_cat]
             else:
                 filtered_articles = all_articles
@@ -2292,22 +2426,33 @@ def main():
 
                 for i, article in enumerate(filtered_articles):
                     cat = article["category"]
-                    cat_color = NEWS_CATEGORIES[cat]["color"]
+                    cat_color = NEWS_CATEGORIES.get(cat, {"color": "#888", "bg": "rgba(136,136,136,0.12)"})["color"]
+                    cat_bg = NEWS_CATEGORIES.get(cat, {"color": "#888", "bg": "rgba(136,136,136,0.12)"})["bg"]
                     headline = article["headline"]
                     link = article.get("link", "#")
                     source = article.get("source", "")
                     pub_date = article.get("pubDate", "")
                     dt = parse_rss_date(pub_date)
                     rel_time = format_relative_time(dt)
+                    is_x = article.get("is_x_post", False)
 
                     col1, col2, col3, col4 = st.columns([1, 6, 2, 1])
                     with col1:
-                        st.markdown(
-                            f'<span style="background:{NEWS_CATEGORIES[cat]["bg"]};color:{cat_color};'
-                            f'font-size:11px;font-weight:700;padding:3px 10px;border-radius:4px;'
-                            f'font-family:monospace;">{cat}</span>',
-                            unsafe_allow_html=True,
-                        )
+                        # Show X icon for tweets, category badge for news
+                        if is_x:
+                            st.markdown(
+                                f'<span style="background:{cat_bg};color:{cat_color};'
+                                f'font-size:11px;font-weight:700;padding:3px 10px;border-radius:4px;'
+                                f'font-family:monospace;">𝕏 {cat}</span>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f'<span style="background:{cat_bg};color:{cat_color};'
+                                f'font-size:11px;font-weight:700;padding:3px 10px;border-radius:4px;'
+                                f'font-family:monospace;">{cat}</span>',
+                                unsafe_allow_html=True,
+                            )
                     with col2:
                         st.markdown(
                             f'<a href="{link}" target="_blank" style="color:#e2e8f0;text-decoration:none;'
@@ -2320,7 +2465,9 @@ def main():
                         st.caption(rel_time)
 
                 st.markdown("---")
-                st.caption(f"Showing {len(filtered_articles)} articles | Refreshes hourly")
+                x_count = sum(1 for a in filtered_articles if a.get("is_x_post", False))
+                news_count = len(filtered_articles) - x_count
+                st.caption(f"Showing {len(filtered_articles)} items ({news_count} articles, {x_count} posts) | Refreshes hourly")
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
