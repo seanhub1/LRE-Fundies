@@ -6,3 +6,4 @@ plotly
 yfinance
 mplfinance
 matplotlib
+gridstatus
