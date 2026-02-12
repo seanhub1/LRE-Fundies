@@ -15,6 +15,8 @@ from io import BytesIO
 import xml.etree.ElementTree as ET
 from html import unescape
 import re
+from gridstatus import Ercot as GridStatusErcot
+from gridstatus.ercot import ERCOTSevenDayLoadForecastReport
 
 
 st.set_page_config(page_title="Fundies", layout="wide", initial_sidebar_state="collapsed")
@@ -1179,11 +1181,93 @@ def fetch_all_news(cache_time):
     all_articles.sort(key=lambda x: parse_rss_date(x.get("pubDate", "")), reverse=True)
     return all_articles
 
+# ── ERCOT Reserve Margin Functions ──
+ALL_HOURS = [f'HE{h:02}' for h in range(1, 25)]
+
+def prep_interval(df_in, col='Interval Start'):
+    df_out = df_in.copy()
+    if col in df_out.columns:
+        df_out[col] = pd.to_datetime(df_out[col]).dt.tz_localize(None)
+        df_out['Hour Ending'] = (df_out[col].dt.hour + 1).apply(lambda x: f'HE{x:02}')
+    return df_out
+
+def filt_date(df_in, d, col='Interval Start'):
+    if df_in.empty or col not in df_in.columns:
+        return pd.DataFrame()
+    return df_in[pd.to_datetime(df_in[col]).dt.date == d].copy()
+
+def safe_int(v, default=0):
+    try:
+        if pd.isna(v): return default
+        return int(v)
+    except (ValueError, TypeError):
+        return default
+
+def safe_float(v, default=0.0):
+    try:
+        if pd.isna(v): return default
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+def add_now_line(fig, current_he):
+    he_str = f"HE{current_he:02}"
+    fig.add_shape(type="line", x0=he_str, x1=he_str, y0=0, y1=1,
+                  yref="paper", line=dict(color="white", width=1.5, dash="dot"))
+    fig.add_annotation(x=he_str, y=1.04, yref="paper", text="Now",
+                       showarrow=False, font=dict(color="white", size=11))
+
+def add_marker(fig, he, y, text, color, yshift=30):
+    fig.add_annotation(
+        x=he, y=y, text=text,
+        showarrow=True, arrowhead=2, arrowsize=1, arrowcolor=color,
+        ax=0, ay=-yshift,
+        font=dict(color=color, size=10, family="monospace"),
+        bgcolor="rgba(0,0,0,0.7)", bordercolor=color, borderwidth=1, borderpad=3
+    )
+
+def style_reserve_xaxis(fig):
+    fig.update_layout(
+        xaxis=dict(
+            title='Hour Ending',
+            tickvals=ALL_HOURS,
+            tickangle=0,
+            range=[-0.5, 23.5],
+            categoryorder='array',
+            categoryarray=ALL_HOURS
+        )
+    )
+
+@st.cache_data(ttl=600)
+def fetch_reserve_data(cache_time):
+    """Fetch capacity forecast, committed capacity, and actual load from gridstatus"""
+    gs_ercot = GridStatusErcot()
+    data = {}
+    try:
+        data['fc'] = gs_ercot.get_capacity_forecast(date='latest')
+    except:
+        data['fc'] = pd.DataFrame()
+    try:
+        data['cc'] = gs_ercot.get_capacity_committed(date='latest')
+    except:
+        data['cc'] = pd.DataFrame()
+    try:
+        data['alz'] = gs_ercot.get_load_by_forecast_zone(date='today')
+    except:
+        data['alz'] = pd.DataFrame()
+    if data['alz'].empty:
+        try:
+            yesterday = datetime.today().date() - timedelta(days=1)
+            data['alz'] = gs_ercot.get_load_by_forecast_zone(date=yesterday)
+        except:
+            pass
+    return data
+
 def main():
     check_password()
     st.title("Fundies")
     try:
-        tab1, tab2, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "Gas", "News"])
+        tab1, tab2, tab5, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Gas", "News"])
         with st.spinner("Loading forecast data..."):
             cache_time = get_cache_time()
             result = fetch_forecast_data(cache_time)
@@ -2468,6 +2552,308 @@ def main():
                 x_count = sum(1 for a in filtered_articles if a.get("is_x_post", False))
                 news_count = len(filtered_articles) - x_count
                 st.caption(f"Showing {len(filtered_articles)} items ({news_count} articles, {x_count} posts) | Refreshes hourly")
+
+        # Tab 5 - ERCOT Reserves
+        with tab5:
+            st.header("ERCOT Reserve Margin")
+
+            from zoneinfo import ZoneInfo
+            now_ct = datetime.now(ZoneInfo('America/Chicago'))
+            current_he = now_ct.hour + 1
+            target_date = now_ct.date()
+            is_today = True
+
+            with st.spinner("Loading reserve data..."):
+                reserve_data = fetch_reserve_data(cache_time)
+
+            fc = reserve_data['fc']
+            cc = reserve_data['cc']
+            alz = reserve_data['alz']
+
+            if not fc.empty:
+                fc = prep_interval(fc)
+            if not cc.empty and 'Interval Start' in cc.columns:
+                cc = prep_interval(cc)
+            if not alz.empty:
+                alz = prep_interval(alz)
+                alz.columns = [c.capitalize() if c in ['NORTH', 'SOUTH', 'WEST', 'HOUSTON', 'TOTAL'] else c for c in alz.columns]
+
+            
+            ercot_load_for_reserves = None
+            if df is not None and not df.empty:
+                today_load = df[df['deliveryDate'] == target_date].copy()
+                if not today_load.empty:
+                    ercot_load_for_reserves = today_load.groupby('HE')['systemTotal'].mean().reset_index()
+                    ercot_load_for_reserves.columns = ['HN', 'Load Forecast']
+                    ercot_load_for_reserves['Hour Ending'] = ercot_load_for_reserves['HN'].apply(lambda x: f'HE{x:02}')
+
+            fc_day = filt_date(fc, target_date) if not fc.empty else pd.DataFrame()
+
+            if fc_day.empty or ercot_load_for_reserves is None or 'Committed Capacity' not in fc_day.columns:
+                st.warning("Reserve data not yet available for today.")
+            else:
+                
+                master = pd.DataFrame({'Hour Ending': ALL_HOURS})
+                master['HN'] = master['Hour Ending'].str.replace('HE', '').astype(int)
+
+                
+                cap_hr = fc_day.groupby('Hour Ending')['Committed Capacity'].mean().reset_index()
+                master = master.merge(cap_hr, on='Hour Ending', how='left')
+
+                
+                if 'Available Capacity' in fc_day.columns:
+                    avail_hr = fc_day.groupby('Hour Ending')['Available Capacity'].mean().reset_index()
+                    master = master.merge(avail_hr, on='Hour Ending', how='left')
+
+                
+                master = master.merge(ercot_load_for_reserves[['Hour Ending', 'Load Forecast']], on='Hour Ending', how='left')
+
+                
+                master['Fcst Reserve MW'] = master['Committed Capacity'] - master['Load Forecast']
+                mask_fcst = master['Load Forecast'] > 0
+                master['Fcst Reserve %'] = pd.Series(dtype=float)
+                master.loc[mask_fcst, 'Fcst Reserve %'] = master.loc[mask_fcst, 'Fcst Reserve MW'] / master.loc[mask_fcst, 'Load Forecast'] * 100
+
+                # Actuals
+                has_actual_cap = False
+                has_actual_load = False
+
+                if is_today and not cc.empty and 'Capacity' in cc.columns:
+                    cc_day = filt_date(cc, target_date)
+                    if not cc_day.empty:
+                        cc_hr = cc_day.groupby('Hour Ending')['Capacity'].mean().reset_index().rename(columns={'Capacity': 'Committed Actual'})
+                        master = master.merge(cc_hr, on='Hour Ending', how='left')
+                        has_actual_cap = True
+
+                if is_today and not alz.empty:
+                    alz_day = filt_date(alz, target_date)
+                    total_col = 'Total' if 'Total' in alz_day.columns else ('TOTAL' if 'TOTAL' in alz_day.columns else None)
+                    if not alz_day.empty and total_col:
+                        alz_hr = alz_day.groupby('Hour Ending')[total_col].mean().reset_index().rename(columns={total_col: 'Actual Load'})
+                        master = master.merge(alz_hr, on='Hour Ending', how='left')
+                        has_actual_load = True
+
+                # Best available for reserves
+                if 'Committed Actual' in master.columns:
+                    master['Best Cap'] = master['Committed Actual'].fillna(master['Committed Capacity'])
+                else:
+                    master['Best Cap'] = master['Committed Capacity']
+
+                if 'Actual Load' in master.columns:
+                    master['Best Load'] = master['Actual Load'].fillna(master['Load Forecast'])
+                else:
+                    master['Best Load'] = master['Load Forecast']
+
+                if has_actual_cap or has_actual_load:
+                    has_any_actual = pd.Series(False, index=master.index)
+                    if has_actual_cap:
+                        has_any_actual = has_any_actual | master['Committed Actual'].notna()
+                    if has_actual_load:
+                        has_any_actual = has_any_actual | master['Actual Load'].notna()
+
+                    master['Actual Reserve MW'] = pd.Series(dtype=float)
+                    master['Actual Reserve %'] = pd.Series(dtype=float)
+                    valid = has_any_actual & (master['Best Load'] > 0)
+                    master.loc[valid, 'Actual Reserve MW'] = master.loc[valid, 'Best Cap'] - master.loc[valid, 'Best Load']
+                    master.loc[valid, 'Actual Reserve %'] = master.loc[valid, 'Actual Reserve MW'] / master.loc[valid, 'Best Load'] * 100
+
+                master = master.sort_values('HN').reset_index(drop=True)
+
+                #  key hours
+                if is_today:
+                    fwd = master[master['HN'] >= current_he].dropna(subset=['Fcst Reserve %'])
+                else:
+                    fwd = master.dropna(subset=['Fcst Reserve %'])
+
+                if not fwd.empty:
+                    tight_idx = fwd['Fcst Reserve %'].idxmin()
+                    tight_he = master.loc[tight_idx, 'Hour Ending']
+                    tight_pct = master.loc[tight_idx, 'Fcst Reserve %']
+                    tight_mw = master.loc[tight_idx, 'Fcst Reserve MW']
+                else:
+                    tight_he, tight_pct, tight_mw = 'N/A', 0, 0
+
+                if is_today:
+                    fwd_load = master[master['HN'] >= current_he].dropna(subset=['Load Forecast'])
+                else:
+                    fwd_load = master.dropna(subset=['Load Forecast'])
+
+                if not fwd_load.empty:
+                    peak_idx = fwd_load['Load Forecast'].idxmax()
+                    res_peak_he = master.loc[peak_idx, 'Hour Ending']
+                    res_peak_load = master.loc[peak_idx, 'Load Forecast']
+                else:
+                    res_peak_he, res_peak_load = 'N/A', 0
+
+                if not fwd.empty:
+                    min_mw_idx = fwd['Fcst Reserve MW'].idxmin()
+                    min_mw_he = master.loc[min_mw_idx, 'Hour Ending']
+                    min_mw = master.loc[min_mw_idx, 'Fcst Reserve MW']
+                else:
+                    min_mw_he, min_mw = 'N/A', 0
+
+                # KPIs
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Tightest Reserve", f"{safe_float(tight_pct):.1f}%  ({tight_he})")
+                k2.metric("Min Reserve MW", f"{safe_int(min_mw):,} MW  ({min_mw_he})")
+                k3.metric("Peak Load", f"{safe_int(res_peak_load):,} MW  ({res_peak_he})")
+
+                st.markdown("---")
+
+                # Capacity vs Load
+                fig_cap = go.Figure()
+
+                if 'Available Capacity' in master.columns:
+                    fig_cap.add_trace(go.Scatter(
+                        x=master['Hour Ending'], y=master['Available Capacity'],
+                        mode='lines', name='Available Capacity',
+                        line=dict(color='#FF9800', width=2, dash='dash'), opacity=0.7
+                    ))
+
+                fig_cap.add_trace(go.Scatter(
+                    x=master['Hour Ending'], y=master['Committed Capacity'],
+                    mode='lines+markers', name='Committed (Forecast)',
+                    line=dict(color='#4CAF50', width=2, dash='dash'), marker=dict(size=4)
+                ))
+
+                if has_actual_cap:
+                    act_cap = master.dropna(subset=['Committed Actual'])
+                    fig_cap.add_trace(go.Scatter(
+                        x=act_cap['Hour Ending'], y=act_cap['Committed Actual'],
+                        mode='lines+markers', name='Committed (Actual)',
+                        line=dict(color='#00E676', width=2.5), marker=dict(size=5)
+                    ))
+
+                fig_cap.add_trace(go.Scatter(
+                    x=master['Hour Ending'], y=master['Load Forecast'],
+                    mode='lines+markers', name='Load Forecast (ERCOT)',
+                    line=dict(color='#FF5252', width=2, dash='dash'), marker=dict(size=4)
+                ))
+
+                if has_actual_load:
+                    act_load = master.dropna(subset=['Actual Load'])
+                    fig_cap.add_trace(go.Scatter(
+                        x=act_load['Hour Ending'], y=act_load['Actual Load'],
+                        mode='lines+markers', name='Actual Load',
+                        line=dict(color='#FF1744', width=2.5), marker=dict(size=5)
+                    ))
+
+                if res_peak_he != 'N/A':
+                    add_marker(fig_cap, res_peak_he, res_peak_load,
+                               f"Peak Load<br>{safe_int(res_peak_load):,} MW", '#FF1744', yshift=35)
+                if is_today:
+                    add_now_line(fig_cap, current_he)
+                fig_cap.update_traces(hovertemplate='%{x}: %{y:,.0f} MW<extra>%{fullData.name}</extra>')
+                fig_cap.update_layout(
+                    title=f"Capacity vs Load — {target_date}",
+                    yaxis=dict(title='MW', tickformat=','),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    height=500, hovermode='x'
+                )
+                style_reserve_xaxis(fig_cap)
+                st.plotly_chart(fig_cap, use_container_width=True)
+
+                # Reserve Margin %
+                fig_pct = go.Figure()
+
+                fcst_rm = master.dropna(subset=['Fcst Reserve %'])
+                fig_pct.add_trace(go.Scatter(
+                    x=fcst_rm['Hour Ending'], y=fcst_rm['Fcst Reserve %'],
+                    mode='lines+markers', name='Reserve % (Forecast)',
+                    line=dict(color='#42A5F5', width=2), marker=dict(size=4)
+                ))
+
+                if 'Actual Reserve %' in master.columns:
+                    act_rm = master.dropna(subset=['Actual Reserve %'])
+                    if not act_rm.empty:
+                        fig_pct.add_trace(go.Scatter(
+                            x=act_rm['Hour Ending'], y=act_rm['Actual Reserve %'],
+                            mode='lines+markers', name='Reserve % (Actual)',
+                            line=dict(color='#29B6F6', width=2.5), marker=dict(size=5)
+                        ))
+
+                fig_pct.add_hline(y=10, line_dash="dash", line_color="red", line_width=1,
+                                  annotation_text="10% — EEA Watch", annotation_position="top left",
+                                  annotation_font_color="red", annotation_font_size=10)
+
+                if tight_he != 'N/A':
+                    add_marker(fig_pct, tight_he, tight_pct,
+                               f"Min {safe_float(tight_pct):.1f}%", '#FF5252', yshift=30)
+
+                if is_today:
+                    add_now_line(fig_pct, current_he)
+                fig_pct.update_traces(hovertemplate='%{x}: %{y:.1f}%<extra>%{fullData.name}</extra>')
+                fig_pct.update_layout(
+                    title=f"Reserve Margin % — {target_date}",
+                    yaxis=dict(title='Reserve %'),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    height=450, hovermode='x'
+                )
+                style_reserve_xaxis(fig_pct)
+                st.plotly_chart(fig_pct, use_container_width=True)
+
+                # Reserve MW
+                fig_rmw = go.Figure()
+
+                fcst_mw = master.dropna(subset=['Fcst Reserve MW'])
+                fig_rmw.add_trace(go.Scatter(
+                    x=fcst_mw['Hour Ending'], y=fcst_mw['Fcst Reserve MW'],
+                    mode='lines', name='Reserve MW (Forecast)',
+                    line=dict(color='#42A5F5', width=2),
+                    fill='tozeroy', fillcolor='rgba(66,165,245,0.15)'
+                ))
+
+                if 'Actual Reserve MW' in master.columns:
+                    act_mw = master.dropna(subset=['Actual Reserve MW'])
+                    if not act_mw.empty:
+                        fig_rmw.add_trace(go.Scatter(
+                            x=act_mw['Hour Ending'], y=act_mw['Actual Reserve MW'],
+                            mode='lines+markers', name='Reserve MW (Actual)',
+                            line=dict(color='#29B6F6', width=2.5), marker=dict(size=5)
+                        ))
+
+                if min_mw_he != 'N/A':
+                    add_marker(fig_rmw, min_mw_he, min_mw,
+                               f"Min {safe_int(min_mw):,} MW", '#FF5252', yshift=30)
+
+                if is_today:
+                    add_now_line(fig_rmw, current_he)
+                fig_rmw.update_traces(hovertemplate='%{x}: %{y:,.0f} MW<extra>%{fullData.name}</extra>')
+                fig_rmw.update_layout(
+                    title=f"Reserve MW — {target_date}",
+                    yaxis=dict(title='MW', tickformat=','),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    height=400, hovermode='x'
+                )
+                style_reserve_xaxis(fig_rmw)
+                st.plotly_chart(fig_rmw, use_container_width=True)
+
+                # Data Table
+                with st.expander("Hourly Data Table"):
+                    show_cols = ['Hour Ending']
+                    if 'Available Capacity' in master.columns:
+                        show_cols.append('Available Capacity')
+                    show_cols.append('Committed Capacity')
+                    if 'Committed Actual' in master.columns:
+                        show_cols.append('Committed Actual')
+                    show_cols.append('Load Forecast')
+                    if 'Actual Load' in master.columns:
+                        show_cols.append('Actual Load')
+                    show_cols += ['Fcst Reserve MW', 'Fcst Reserve %']
+                    if 'Actual Reserve MW' in master.columns:
+                        show_cols.append('Actual Reserve MW')
+                    if 'Actual Reserve %' in master.columns:
+                        show_cols.append('Actual Reserve %')
+
+                    disp = master[[c for c in show_cols if c in master.columns]].copy()
+                    for c in disp.columns:
+                        if c == 'Hour Ending':
+                            continue
+                        elif '%' in c:
+                            disp[c] = disp[c].apply(lambda x: f'{float(x):.1f}%' if pd.notna(x) else '')
+                        else:
+                            disp[c] = disp[c].apply(lambda x: f'{int(float(x)):,}' if pd.notna(x) else '')
+                    st.dataframe(disp, use_container_width=True, hide_index=True)
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
