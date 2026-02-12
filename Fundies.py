@@ -2773,7 +2773,7 @@ def main():
                         ))
 
                 fig_pct.add_hline(y=10, line_dash="dash", line_color="red", line_width=1,
-                                  annotation_text="10% — EEA Watch", annotation_position="top left",
+                                  annotation_text="10% Area to Watch", annotation_position="top left",
                                   annotation_font_color="red", annotation_font_size=10)
 
                 if tight_he != 'N/A':
@@ -2862,3 +2862,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
