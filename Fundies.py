@@ -17,6 +17,7 @@ from html import unescape
 import re
 from gridstatus import Ercot as GridStatusErcot
 from gridstatus.ercot import ERCOTSevenDayLoadForecastReport
+import numpy as np
 
 
 st.set_page_config(page_title="Fundies", layout="wide", initial_sidebar_state="collapsed")
@@ -1263,11 +1264,825 @@ def fetch_reserve_data(cache_time):
             pass
     return data
 
+ERCOT_ONPEAK = (7, 22)
+PJM_ONPEAK   = (8, 23)
+PJM_WESTERN_HUB_ID = '51217'
+
+@st.cache_data(ttl=3600)
+def _balday_ercot_token():
+    uid = st.secrets["ercot"]["username"]
+    pwd = st.secrets["ercot"]["password"]
+    SUBSCRIPTION = st.secrets["ercot"]["subscription"]
+    AUTH_URL = (
+        "https://ercotb2c.b2clogin.com/"
+        "ercotb2c.onmicrosoft.com/"
+        "B2C_1_PUBAPI-ROPC-FLOW/oauth2/v2.0/token"
+    )
+    data = {
+        'username': uid, 'password': pwd,
+        'scope': 'openid fec253ea-0d06-4272-a5e6-b478baeecd70 offline_access',
+        'client_id': 'fec253ea-0d06-4272-a5e6-b478baeecd70',
+        'response_type': 'id_token', 'grant_type': 'password',
+    }
+    resp = requests.post(AUTH_URL, data=data, timeout=30)
+    if resp.ok:
+        return {
+            "Authorization": "Bearer " + resp.json().get("access_token"),
+            "Ocp-Apim-Subscription-Key": SUBSCRIPTION,
+        }
+    return None
+
+def _balday_pjm_headers():
+    return {'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"]}
+
+def _balday_pjm_api_call(url, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            result = requests.get(url, headers=_balday_pjm_headers(), timeout=(30, 60))
+            if result.ok:
+                return result.json()
+            if result.status_code == 400:
+                return None
+        except requests.exceptions.RequestException:
+            if attempt < max_retries - 1:
+                time.sleep(3)
+    return None
+
+@st.cache_data(ttl=86400)
+def _fetch_ercot_da(today_str):
+    """Fetch today's ERCOT DA SPP for HB_NORTH."""
+    headers = _balday_ercot_token()
+    if not headers:
+        return pd.DataFrame()
+    url = "https://api.ercot.com/api/public-reports/np4-190-cd/dam_stlmnt_pnt_prices"
+    params = {
+        'deliveryDateFrom': today_str, 'deliveryDateTo': today_str,
+        'settlementPoint': 'HB_NORTH', 'DSTFlag': 'false', 'size': 200000,
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        if resp.status_code != 200:
+            return pd.DataFrame()
+        rows = resp.json().get('data', [])
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows, columns=["deliveryDate","hourEnding","settlementPoint","settlementPointPrice","DSTFlag"])
+        df['HE'] = df['hourEnding'].str[:2].astype(int)
+        df['DA Price'] = pd.to_numeric(df['settlementPointPrice'], errors='coerce')
+        return df[['HE', 'DA Price']]
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=900)
+def _fetch_ercot_rt(today_str, cache_buster):
+    """Fetch today's ERCOT RT 15-min SPP for HB_NORTH, averaged to hourly."""
+    headers = _balday_ercot_token()
+    if not headers:
+        return pd.DataFrame()
+    url = "https://api.ercot.com/api/public-reports/np6-905-cd/spp_node_zone_hub"
+    params = {
+        'deliveryDateFrom': today_str, 'deliveryDateTo': today_str,
+        'settlementPoint': 'HB_NORTH', 'DSTFlag': 'false', 'size': 200000,
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        if resp.status_code != 200:
+            return pd.DataFrame()
+        data_json = resp.json()
+        rows = data_json.get('data', [])
+        fields = data_json.get('fields', [])
+        if not rows or not fields:
+            return pd.DataFrame()
+        col_names = [f.get('name') or f.get('label') for f in fields]
+        df = pd.DataFrame(rows, columns=col_names)
+        df['HE'] = pd.to_numeric(df['deliveryHour'], errors='coerce').astype(int)
+        df['settlementPointPrice'] = pd.to_numeric(df['settlementPointPrice'], errors='coerce')
+        hourly = df.groupby('HE')['settlementPointPrice'].mean().reset_index()
+        hourly.columns = ['HE', 'RT Price']
+        return hourly
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=86400)
+def _fetch_pjm_da(today_str):
+    """Fetch today's PJM DA LMP for WESTERN HUB."""
+    from urllib.parse import quote
+    start_dt = f"{today_str} 00:00"
+    end_dt = f"{today_str} 23:59"
+    date_range = f"{start_dt} to {end_dt}"
+    params = {
+        'datetime_beginning_ept': date_range,
+        'pnode_id': PJM_WESTERN_HUB_ID,
+        'rowCount': 50000, 'startRow': 1,
+    }
+    param_str = '&'.join([f"{k}={quote(str(v))}" for k, v in params.items()])
+    url = f"https://api.pjm.com/api/v1/da_hrl_lmps?{param_str}"
+    data_json = _balday_pjm_api_call(url)
+    if not data_json:
+        return pd.DataFrame()
+    items = data_json.get('items', [])
+    if not items:
+        return pd.DataFrame()
+    df = pd.DataFrame(items)
+    df['datetime'] = pd.to_datetime(df['datetime_beginning_ept'])
+    df['HE'] = df['datetime'].dt.hour + 1
+    df['DA Price'] = pd.to_numeric(df['total_lmp_da'], errors='coerce')
+    return df[['HE', 'DA Price']]
+
+@st.cache_data(ttl=900)
+def _fetch_pjm_rt(today_str, cache_buster):
+    """Fetch today's PJM RT LMP for WESTERN HUB via YES Energy. Returns (df, debug_list) tuple."""
+    from io import StringIO
+    debug = []
+    YES_AUTH = ('Leeward_YesAPI1', 'LresYsEnergy202%!')
+    YES_BASE = 'https://services.yesenergy.com/PS/rest'
+
+    try:
+        url = f"{YES_BASE}/timeseries/RTLMP/WESTERN HUB?agglevel=HOUR&startdate={today_str}&enddate={today_str}"
+        resp = requests.get(url, auth=YES_AUTH, timeout=30)
+        if resp.ok and len(resp.text) > 100:
+            df = pd.read_html(StringIO(resp.text))[0]
+            if 'error' not in df.columns and len(df.columns) > 1:
+                df['HE'] = pd.to_numeric(df['HOURENDING'], errors='coerce').astype(int)
+                df['RT Price'] = pd.to_numeric(df['AVGVALUE'], errors='coerce')
+                hourly = df.groupby('HE')['RT Price'].mean().reset_index()
+                if not hourly.empty:
+                    debug.append(f"YES RTLMP: {len(hourly)} HEs through HE{hourly['HE'].max()}")
+                    return hourly, debug
+        debug.append(f"YES RTLMP: status={resp.status_code}, bytes={len(resp.text)}")
+    except Exception as e:
+        debug.append(f"YES error: {e}")
+
+    return pd.DataFrame(), debug
+
+@st.cache_data(ttl=86400)
+def _fetch_ercot_historical_dart(cache_date_str):
+    """Fetch 365 days of ERCOT DA + RT hourly for HB_NORTH, return per-hour DART."""
+    headers = _balday_ercot_token()
+    if not headers:
+        return pd.DataFrame()
+
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+    da_url = "https://api.ercot.com/api/public-reports/np4-190-cd/dam_stlmnt_pnt_prices"
+    da_params = {
+        'deliveryDateFrom': start_date, 'deliveryDateTo': end_date,
+        'settlementPoint': 'HB_NORTH', 'DSTFlag': 'false', 'size': 2000000,
+    }
+    try:
+        resp = requests.get(da_url, headers=headers, params=da_params, timeout=120)
+        if resp.status_code != 200:
+            return pd.DataFrame()
+        da_rows = resp.json().get('data', [])
+        if not da_rows:
+            return pd.DataFrame()
+        da_df = pd.DataFrame(da_rows,
+            columns=["deliveryDate","hourEnding","settlementPoint","settlementPointPrice","DSTFlag"])
+        da_df['date'] = da_df['deliveryDate']
+        da_df['HE'] = da_df['hourEnding'].str[:2].astype(int)
+        da_df['DA'] = pd.to_numeric(da_df['settlementPointPrice'], errors='coerce')
+        da_df = da_df[['date', 'HE', 'DA']].dropna()
+    except Exception:
+        return pd.DataFrame()
+
+    rt_url = "https://api.ercot.com/api/public-reports/np6-905-cd/spp_node_zone_hub"
+    rt_params = {
+        'deliveryDateFrom': start_date, 'deliveryDateTo': end_date,
+        'settlementPoint': 'HB_NORTH', 'DSTFlag': 'false', 'size': 2000000,
+    }
+    try:
+        resp = requests.get(rt_url, headers=headers, params=rt_params, timeout=120)
+        if resp.status_code != 200:
+            return pd.DataFrame()
+        data_json = resp.json()
+        rt_rows = data_json.get('data', [])
+        fields = data_json.get('fields', [])
+        if not rt_rows or not fields:
+            return pd.DataFrame()
+        col_names = [f.get('name') or f.get('label') for f in fields]
+        rt_df = pd.DataFrame(rt_rows, columns=col_names)
+        rt_df['date'] = rt_df['deliveryDate'].astype(str)
+        rt_df['HE'] = pd.to_numeric(rt_df['deliveryHour'], errors='coerce').astype(int)
+        rt_df['RT'] = pd.to_numeric(rt_df['settlementPointPrice'], errors='coerce')
+        rt_df = rt_df.groupby(['date', 'HE'])['RT'].mean().reset_index()
+    except Exception:
+        return pd.DataFrame()
+
+    merged = da_df.merge(rt_df, on=['date', 'HE'], how='inner')
+    merged['DART'] = merged['DA'] - merged['RT']
+    merged['date'] = pd.to_datetime(merged['date'])
+    merged['doy'] = merged['date'].dt.dayofyear
+    return merged[['date', 'doy', 'HE', 'DA', 'RT', 'DART']]
+
+
+@st.cache_data(ttl=86400)
+def _fetch_pjm_historical_dart(cache_date_str):
+    """Fetch 365 days of PJM DA + RT hourly for WESTERN HUB, return per-hour DART."""
+    from urllib.parse import quote
+
+    end_date = datetime.now().strftime('%Y-%m-%d')
+    start_dt = datetime.now() - timedelta(days=365)
+
+    all_da = []
+    current = start_dt
+    while current.date() <= datetime.now().date():
+        chunk_end = min(current + timedelta(days=30), datetime.now())
+        date_range = f"{current.strftime('%Y-%m-%d')} 00:00 to {chunk_end.strftime('%Y-%m-%d')} 23:59"
+        params = {
+            'datetime_beginning_ept': date_range,
+            'pnode_id': PJM_WESTERN_HUB_ID,
+            'rowCount': 50000, 'startRow': 1,
+        }
+        param_str = '&'.join([f"{k}={quote(str(v))}" for k, v in params.items()])
+        url = f"https://api.pjm.com/api/v1/da_hrl_lmps?{param_str}"
+        data_json = _balday_pjm_api_call(url)
+        if data_json and data_json.get('items'):
+            all_da.extend(data_json['items'])
+        current = chunk_end + timedelta(days=1)
+        time.sleep(0.5)
+
+    if not all_da:
+        return pd.DataFrame()
+
+    da_df = pd.DataFrame(all_da)
+    da_df['datetime'] = pd.to_datetime(da_df['datetime_beginning_ept'])
+    da_df['date'] = da_df['datetime'].dt.strftime('%Y-%m-%d')
+    da_df['HE'] = da_df['datetime'].dt.hour + 1
+    da_df['DA'] = pd.to_numeric(da_df['total_lmp_da'], errors='coerce')
+    da_df = da_df[['date', 'HE', 'DA']].dropna()
+
+    all_rt = []
+    current = start_dt
+    while current.date() <= datetime.now().date():
+        chunk_end = min(current + timedelta(days=30), datetime.now())
+        date_range = f"{current.strftime('%Y-%m-%d')} 00:00 to {chunk_end.strftime('%Y-%m-%d')} 23:59"
+        params = {
+            'datetime_beginning_ept': date_range,
+            'pnode_id': PJM_WESTERN_HUB_ID,
+            'rowCount': 50000, 'startRow': 1,
+        }
+        param_str = '&'.join([f"{k}={quote(str(v))}" for k, v in params.items()])
+        url = f"https://api.pjm.com/api/v1/rt_hrl_lmps?{param_str}"
+        data_json = _balday_pjm_api_call(url)
+        if data_json and data_json.get('items'):
+            all_rt.extend(data_json['items'])
+        current = chunk_end + timedelta(days=1)
+        time.sleep(0.5)
+
+    if not all_rt:
+        return pd.DataFrame()
+
+    rt_df = pd.DataFrame(all_rt)
+    rt_df['datetime'] = pd.to_datetime(rt_df['datetime_beginning_ept'])
+    rt_df['date'] = rt_df['datetime'].dt.strftime('%Y-%m-%d')
+    rt_df['HE'] = rt_df['datetime'].dt.hour + 1
+    rt_df['RT'] = pd.to_numeric(rt_df['total_lmp_rt'], errors='coerce')
+    rt_df = rt_df[['date', 'HE', 'RT']].dropna()
+
+    merged = da_df.merge(rt_df, on=['date', 'HE'], how='inner')
+    merged['DART'] = merged['DA'] - merged['RT']
+    merged['date'] = pd.to_datetime(merged['date'])
+    merged['doy'] = merged['date'].dt.dayofyear
+    return merged[['date', 'doy', 'HE', 'DA', 'RT', 'DART']]
+
+
+def _seasonal_weights(hist_doy, today_doy, halflife=30):
+    """Gaussian kernel weights — days near today's calendar date get more weight."""
+    diff = np.abs(hist_doy - today_doy)
+    diff = np.minimum(diff, 365 - diff)
+    return np.exp(-0.5 * (diff / halflife) ** 2)
+
+
+def _regime_weights(hist_df, printed_hes_dart, printed_hes_list):
+    """
+    Compute per-date regime weights based on how similar each historical day's
+    printed-hour DART pattern is to today's.
+    """
+    if printed_hes_dart.empty or not printed_hes_list:
+        return None
+
+    today_avg_dart = printed_hes_dart['DART'].mean()
+
+    hist_printed = hist_df[hist_df['HE'].isin(printed_hes_list)]
+    if hist_printed.empty:
+        return None
+
+    hist_daily_dart = hist_printed.groupby('date')['DART'].mean().reset_index()
+    hist_daily_dart.columns = ['date', 'hist_printed_dart']
+
+    dart_diff = np.abs(hist_daily_dart['hist_printed_dart'].values - today_avg_dart)
+    dart_halflife = max(5.0, np.std(hist_daily_dart['hist_printed_dart'].values) * 0.75)
+    regime_wt = np.exp(-0.5 * (dart_diff / dart_halflife) ** 2)
+
+    hist_daily_dart['regime_weight'] = regime_wt
+    return hist_daily_dart[['date', 'regime_weight']]
+
+
+def _run_monte_carlo(hist_df, remaining_hes, rt_printed_sum, n_printed,
+                     onpk_hours, today_doy, printed_hes_dart, printed_hes_list,
+                     today_da_by_he, n_sims=10000):
+    """
+    Regime-conditional Monte Carlo simulation.
+    Samples historical DART spreads (DA - RT) per hour, NOT absolute RT prices.
+    Then computes simulated RT = today's DA - sampled DART for each remaining hour.
+    """
+    if hist_df.empty or not remaining_hes:
+        return np.array([])
+
+    date_info = hist_df.groupby('date')['doy'].first().reset_index()
+    date_info['seasonal_wt'] = _seasonal_weights(date_info['doy'].values, today_doy, halflife=30)
+
+    regime_df = _regime_weights(hist_df, printed_hes_dart, printed_hes_list)
+    if regime_df is not None:
+        date_info = date_info.merge(regime_df, on='date', how='left')
+        date_info['regime_weight'] = date_info['regime_weight'].fillna(0.1)
+    else:
+        date_info['regime_weight'] = 1.0
+
+    date_info['combined_wt'] = (
+        date_info['seasonal_wt'] * 0.3 +
+        date_info['regime_weight'] * 0.7
+    )
+    date_info['combined_wt'] = date_info['combined_wt'].clip(lower=0.01)
+
+    date_weight_map = dict(zip(date_info['date'], date_info['combined_wt']))
+
+    rng = np.random.default_rng()
+    simulated_remaining_rt_sum = np.zeros(n_sims)
+
+    for he in remaining_hes:
+        he_data = hist_df[hist_df['HE'] == he].copy()
+        if he_data.empty:
+            continue
+
+        today_da_he = today_da_by_he.get(he, 0)
+        if today_da_he == 0:
+            continue
+
+        he_weights = np.array([date_weight_map.get(d, 0.01) for d in he_data['date'].values])
+        he_weights = he_weights / he_weights.sum()
+
+        dart_samples = rng.choice(he_data['DART'].values, size=n_sims, p=he_weights)
+        simulated_rt_he = today_da_he - dart_samples
+        simulated_remaining_rt_sum += simulated_rt_he
+
+    simulated_rt_avg = (rt_printed_sum + simulated_remaining_rt_sum) / onpk_hours
+    return simulated_rt_avg
+
+
+def _render_probability(iso_choice, da_avg, rt_printed_sum, rt_printed_avg,
+                        n_printed, n_remaining, onpk_hours, onpk_start, onpk_end,
+                        active_he, is_long, hours, now_ct, printed_with_da):
+    """Render the regime-conditional Monte Carlo probability section."""
+
+    cache_key = now_ct.strftime('%Y-%m-%d')
+    with st.spinner(f"Loading {iso_choice} historical data (365 days)..."):
+        if iso_choice == "ERCOT":
+            hist = _fetch_ercot_historical_dart(cache_key)
+        else:
+            hist = _fetch_pjm_historical_dart(cache_key)
+
+    if hist.empty:
+        st.warning("Could not load historical data for probability analysis.")
+        return
+
+    today_doy = now_ct.timetuple().tm_yday
+
+    remaining_hes = hours[~hours['Printed']]['HE'].tolist()
+    printed_hes_list = hours[hours['Printed']]['HE'].tolist()
+
+    if not remaining_hes:
+        return
+
+    today_da_by_he = dict(zip(hours['HE'], hours['DA Price']))
+
+    sim_rt_avg = _run_monte_carlo(
+        hist, remaining_hes, rt_printed_sum, n_printed,
+        onpk_hours, today_doy, printed_with_da, printed_hes_list,
+        today_da_by_he, n_sims=10000,
+    )
+
+    if len(sim_rt_avg) == 0:
+        st.warning("Insufficient historical data for simulation.")
+        return
+
+    sim_dart = da_avg - sim_rt_avg
+    prob_da_over_rt = (sim_dart > 0).mean() * 100
+    prob_rt_over_da = (sim_dart < 0).mean() * 100
+
+    if is_long:
+        your_prob = prob_rt_over_da
+        your_label = "RT outperforms DA"
+    else:
+        your_prob = prob_da_over_rt
+        your_label = "DA outperforms RT"
+
+    p10 = np.percentile(sim_rt_avg, 10)
+    p50 = np.percentile(sim_rt_avg, 50)
+    p90 = np.percentile(sim_rt_avg, 90)
+
+    if your_prob >= 65:
+        prob_color = "#4CAF50"
+    elif your_prob >= 45:
+        prob_color = "#FFD54F"
+    else:
+        prob_color = "#FF5252"
+
+    p1, p2, p3 = st.columns(3)
+    p1.markdown(
+        f'<div style="text-align:center;padding:10px;">'
+        f'<div style="color:#888;font-size:12px;margin-bottom:4px;">Your Position ({("Long" if is_long else "Short")})</div>'
+        f'<div style="color:{prob_color};font-size:36px;font-weight:700;">{your_prob:.0f}%</div>'
+        f'<div style="color:#aaa;font-size:12px;">{your_label}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    p2.markdown(
+        f'<div style="text-align:center;padding:10px;">'
+        f'<div style="color:#888;font-size:12px;margin-bottom:4px;">Median RT Settle</div>'
+        f'<div style="color:#fff;font-size:28px;font-weight:700;">${p50:,.2f}</div>'
+        f'<div style="color:#aaa;font-size:12px;">DA: ${da_avg:,.2f}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    p3.markdown(
+        f'<div style="text-align:center;padding:10px;">'
+        f'<div style="color:#888;font-size:12px;margin-bottom:4px;">80% Range</div>'
+        f'<div style="color:#fff;font-size:22px;font-weight:600;">${p10:,.2f} — ${p90:,.2f}</div>'
+        f'<div style="color:#aaa;font-size:12px;">10th to 90th percentile</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    fig_dist = go.Figure()
+
+    fig_dist.add_trace(go.Histogram(
+        x=sim_rt_avg,
+        nbinsx=80,
+        marker_color='rgba(66,165,245,0.5)',
+        marker_line=dict(color='#42A5F5', width=0.5),
+        name='Simulated RT Settle',
+    ))
+
+    fig_dist.update_layout(
+        title="Monte Carlo — Simulated Final RT OnPk Avg (10,000 scenarios)",
+        xaxis=dict(title='Simulated RT OnPk Avg ($/MWh)'),
+        yaxis=dict(title='Frequency'),
+        height=350,
+        showlegend=False,
+        bargap=0.02,
+    )
+    st.plotly_chart(fig_dist, use_container_width=True)
+
+
+def _render_balday(now_ct, current_he, cache_time):
+    """Render the Bal-Day P&L calculator."""
+    from zoneinfo import ZoneInfo as ZI
+
+    mins_past_quarter = now_ct.minute % 15
+    secs_to_next_quarter = (15 - mins_past_quarter) * 60 - now_ct.second + 30
+    if secs_to_next_quarter < 60:
+        secs_to_next_quarter += 900
+    st.markdown(f'<meta http-equiv="refresh" content="{secs_to_next_quarter}">', unsafe_allow_html=True)
+
+    next_refresh = now_ct + timedelta(seconds=secs_to_next_quarter)
+    st.header("Bal-Day Calculator")
+    st.caption(f"Next refresh: {next_refresh.strftime('%I:%M %p CT')} · Updated: {now_ct.strftime('%I:%M:%S %p CT')}")
+
+    col_iso, col_pos, _ = st.columns([2, 2, 3])
+    with col_iso:
+        iso_choice = st.selectbox("Market", ["ERCOT", "PJM"], index=0)
+    with col_pos:
+        position = st.selectbox("Position", ["Long", "Short"])
+
+    is_long = position == "Long"
+
+    if iso_choice == "ERCOT":
+        node_label = "HB_NORTH"
+        onpk_start, onpk_end = ERCOT_ONPEAK
+        active_he = current_he
+    else:
+        node_label = "WESTERN HUB"
+        onpk_start, onpk_end = PJM_ONPEAK
+        now_ept = datetime.now(ZI('America/New_York'))
+        active_he = now_ept.hour + 1
+
+    onpk_hours = onpk_end - onpk_start + 1
+
+    if iso_choice == "ERCOT":
+        today_str = now_ct.strftime('%Y-%m-%d')
+    else:
+        today_str = datetime.now(ZI('America/New_York')).strftime('%Y-%m-%d')
+
+    rtcache_buster = now_ct.strftime('%Y-%m-%d %H:') + str(now_ct.minute // 15)
+
+    with st.spinner(f"Fetching {iso_choice} DA & RT for {node_label}..."):
+        if iso_choice == "ERCOT":
+            da_df = _fetch_ercot_da(today_str)
+            rt_df = _fetch_ercot_rt(today_str, rtcache_buster)
+            pjm_debug = []
+        else:
+            da_df = _fetch_pjm_da(today_str)
+            rt_result = _fetch_pjm_rt(today_str, rtcache_buster)
+            rt_df = rt_result[0]
+            pjm_debug = rt_result[1]
+
+    if iso_choice == "PJM":
+        if not rt_df.empty:
+            latest_he = rt_df['HE'].max()
+            if latest_he < active_he - 1:
+                st.caption(f"PJM RT through HE{latest_he}")
+        if rt_df.empty and pjm_debug:
+            with st.expander("PJM RT Debug — NO DATA"):
+                st.caption(f"today_str (EPT): {today_str} | active_he: {active_he}")
+                for d in pjm_debug:
+                    st.text(d)
+
+    if da_df.empty:
+        st.warning(f"{iso_choice} DA prices not available yet for today.")
+        return
+
+    da_onpk = da_df[(da_df['HE'] >= onpk_start) & (da_df['HE'] <= onpk_end)].copy()
+    da_by_he = da_onpk.groupby('HE')['DA Price'].mean().reset_index()
+    da_avg = da_by_he['DA Price'].mean()
+
+    rt_by_he = pd.DataFrame()
+    if not rt_df.empty:
+        rt_onpk = rt_df[(rt_df['HE'] >= onpk_start) & (rt_df['HE'] <= onpk_end)].copy()
+        if not rt_onpk.empty:
+            rt_by_he = rt_onpk.groupby('HE')['RT Price'].mean().reset_index()
+
+    hours = pd.DataFrame({'HE': range(onpk_start, onpk_end + 1)})
+    hours['Hour Ending'] = hours['HE'].apply(lambda x: f'HE{x:02}')
+    hours = hours.merge(da_by_he, on='HE', how='left')
+    if not rt_by_he.empty:
+        hours = hours.merge(rt_by_he, on='HE', how='left')
+    else:
+        hours['RT Price'] = pd.Series(dtype=float)
+
+    hours['Printed'] = hours['RT Price'].notna() & (hours['HE'] < active_he)
+    if not rt_by_he.empty and active_he in rt_by_he['HE'].values:
+        hours.loc[hours['HE'] == active_he, 'Printed'] = True
+
+    printed = hours[hours['Printed']].copy()
+    remaining = hours[~hours['Printed']].copy()
+    n_printed = len(printed)
+    n_remaining = len(remaining)
+
+    rt_printed_sum = printed['RT Price'].sum() if n_printed > 0 else 0
+    rt_printed_avg = printed['RT Price'].mean() if n_printed > 0 else 0
+
+    if n_remaining > 0:
+        breakeven_remaining = (da_avg * onpk_hours - rt_printed_sum) / n_remaining
+    else:
+        breakeven_remaining = 0
+
+    current_dart = da_avg - rt_printed_avg if n_printed > 0 else 0
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("DA OnPk Avg", f"${da_avg:,.2f}")
+
+    if n_printed > 0:
+        if is_long:
+            dart_color = "#4CAF50" if current_dart < 0 else "#FF5252" if current_dart > 0 else "#888"
+        else:
+            dart_color = "#4CAF50" if current_dart > 0 else "#FF5252" if current_dart < 0 else "#888"
+        dart_sign = "+" if current_dart >= 0 else ""
+        k2.markdown(
+            f'<div style="font-size:12px;color:#888;margin-bottom:2px;">RT OnPk Avg</div>'
+            f'<div style="font-size:26px;font-weight:700;color:#fafafa;">${rt_printed_avg:,.2f}</div>'
+            f'<span style="background:rgba({int(dart_color[1:3],16)},{int(dart_color[3:5],16)},{int(dart_color[5:7],16)},0.2);'
+            f'color:{dart_color};font-size:13px;font-weight:600;padding:3px 10px;border-radius:5px;'
+            f'border:1px solid {dart_color};">{dart_sign}${current_dart:,.2f} DART</span>',
+            unsafe_allow_html=True,
+        )
+    else:
+        k2.metric("RT OnPk Avg", "—")
+
+    k3.metric("Hours Printed / Left", f"{n_printed} / {n_remaining}")
+
+    st.markdown("---")
+
+    if n_printed > 0 and n_remaining > 0:
+        rt_leading = rt_printed_avg > da_avg
+        if rt_leading:
+            leader = "RT outperforming DA"
+        else:
+            leader = "DA outperforming RT"
+
+        if is_long:
+            box_color = "#4CAF50" if rt_leading else "#FF5252"
+        else:
+            box_color = "#4CAF50" if not rt_leading else "#FF5252"
+
+        r, g, b = int(box_color[1:3],16), int(box_color[3:5],16), int(box_color[5:7],16)
+        if is_long:
+            dart_goal = "to close with a negative DART"
+        else:
+            dart_goal = "to close with a positive DART"
+        st.markdown(
+            f'<div style="background:rgba({r},{g},{b},0.12);'
+            f'border:1px solid {box_color};border-radius:8px;padding:14px 22px;margin-bottom:16px;">'
+            f'<span style="color:{box_color};font-weight:700;font-size:15px;">{leader}</span><br>'
+            f'<span style="color:#ccc;font-size:17px;font-weight:600;margin-top:6px;display:inline-block;">'
+            f'Remaining {n_remaining} hours need to avg '
+            f'{"above " if is_long else "below "}'
+            f'<span style="color:#fff;font-size:20px;font-weight:700;">${breakeven_remaining:,.2f}</span>'
+            f' {dart_goal}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    elif n_remaining == 0 and n_printed > 0:
+        final_dart = rt_printed_avg - da_avg
+        leader = "RT outperformed DA" if final_dart > 0 else "DA outperformed RT"
+        if is_long:
+            box_color = "#4CAF50" if final_dart > 0 else "#FF5252"
+        else:
+            box_color = "#4CAF50" if final_dart < 0 else "#FF5252"
+        r, g, b = int(box_color[1:3],16), int(box_color[3:5],16), int(box_color[5:7],16)
+        st.markdown(
+            f'<div style="background:rgba({r},{g},{b},0.12);'
+            f'border:1px solid {box_color};border-radius:8px;padding:12px 20px;margin-bottom:16px;">'
+            f'<span style="color:{box_color};font-weight:700;font-size:15px;">ON-PEAK COMPLETE — {leader}</span><br>'
+            f'<span style="color:#aaa;font-size:13px;">Final DART: <b style="color:#fff;">${final_dart:+,.2f}</b>/MWh</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=hours['Hour Ending'], y=hours['DA Price'],
+        name='DA', marker_color='#AB47BC',
+        opacity=0.85, width=0.35, offset=-0.18,
+    ))
+
+    if n_printed > 0:
+        rt_display = hours['RT Price'].copy()
+        rt_display[~hours['Printed']] = None
+        fig.add_trace(go.Bar(
+            x=hours['Hour Ending'], y=rt_display,
+            name='RT', marker_color='#42A5F5',
+            opacity=0.85, width=0.35, offset=0.18,
+        ))
+
+    fig.add_hline(y=da_avg, line_dash="dash", line_color="#AB47BC", line_width=2,
+                  annotation_text=f"DA Avg ${da_avg:,.2f}", annotation_position="top right",
+                  annotation_font_color="#AB47BC", annotation_font_size=11)
+
+    if n_printed > 0:
+        fig.add_hline(y=rt_printed_avg, line_dash="dot", line_color="#42A5F5", line_width=2,
+                      annotation_text=f"RT Avg ${rt_printed_avg:,.2f}", annotation_position="bottom right",
+                      annotation_font_color="#42A5F5", annotation_font_size=11)
+
+    if n_remaining > 0 and n_printed > 0:
+        fig.add_hline(y=breakeven_remaining, line_dash="dash", line_color="#FFD54F", line_width=1.5,
+                      annotation_text=f"Breakeven ${breakeven_remaining:,.2f}", annotation_position="top left",
+                      annotation_font_color="#FFD54F", annotation_font_size=11)
+
+    if onpk_start <= active_he <= onpk_end:
+        add_now_line(fig, active_he)
+
+    onpk_he_labels = [f'HE{h:02}' for h in range(onpk_start, onpk_end + 1)]
+    fig.update_layout(
+        title=f"Bal-Day — {iso_choice} {node_label} — {now_ct.date()}",
+        yaxis=dict(title='$/MWh'),
+        xaxis=dict(title='Hour Ending', tickvals=onpk_he_labels, tickangle=0,
+                   categoryorder='array', categoryarray=onpk_he_labels),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        barmode='group', height=500, hovermode='x',
+        bargap=0.15, bargroupgap=0.02,
+    )
+    fig.update_traces(hovertemplate='%{x}: $%{y:,.2f}<extra>%{fullData.name}</extra>')
+    st.plotly_chart(fig, use_container_width=True)
+
+    if n_printed > 0 and n_remaining > 0:
+        st.markdown("#### RT Settle Probability")
+
+        printed_with_da = printed[['HE', 'DA Price', 'RT Price']].copy()
+        printed_with_da['DART'] = printed_with_da['DA Price'] - printed_with_da['RT Price']
+
+        _render_probability(
+            iso_choice, da_avg, rt_printed_sum, rt_printed_avg,
+            n_printed, n_remaining, onpk_hours, onpk_start, onpk_end,
+            active_he, is_long, hours, now_ct, printed_with_da,
+        )
+
+    if n_printed > 0 and n_remaining > 0:
+        st.markdown("---")
+        st.markdown("#### Target Settle Scenario")
+        col_input, col_spacer = st.columns([2, 4])
+        with col_input:
+            target_rt = st.text_input(
+                "Target Final RT OnPk Avg ($/MWh)",
+                value="",
+                placeholder=f"e.g. {da_avg:.2f}",
+                key="target_rt_input",
+            )
+
+        if target_rt.strip():
+            try:
+                target_rt_val = float(target_rt.strip().replace('$', '').replace(',', ''))
+            except ValueError:
+                st.warning("Enter a valid number.")
+                target_rt_val = None
+
+            if target_rt_val is not None:
+                needed_avg = (target_rt_val * onpk_hours - rt_printed_sum) / n_remaining
+                target_dart = da_avg - target_rt_val
+
+                if is_long:
+                    pnl_per_mwh = target_rt_val - da_avg
+                    outcome = "profit" if pnl_per_mwh > 0 else "loss"
+                else:
+                    pnl_per_mwh = da_avg - target_rt_val
+                    outcome = "profit" if pnl_per_mwh > 0 else "loss"
+
+                pnl_color = "#4CAF50" if outcome == "profit" else "#FF5252"
+                rv, gv, bv = int(pnl_color[1:3],16), int(pnl_color[3:5],16), int(pnl_color[5:7],16)
+
+                st.markdown(
+                    f'<div style="background:rgba({rv},{gv},{bv},0.10);'
+                    f'border:1px solid rgba({rv},{gv},{bv},0.4);border-radius:8px;padding:14px 22px;margin:8px 0 16px 0;">'
+                    f'<span style="color:#ccc;font-size:17px;font-weight:600;">'
+                    f'Remaining {n_remaining} hours need to avg '
+                    f'<span style="color:#fff;font-size:22px;font-weight:700;">${needed_avg:,.2f}</span>'
+                    f'</span><br>'
+                    f'<span style="color:#aaa;font-size:13px;margin-top:4px;display:inline-block;">'
+                    f'Target RT: ${target_rt_val:,.2f} · DA: ${da_avg:,.2f} · '
+                    f'DART: {("+" if target_dart >= 0 else "")}${target_dart:,.2f} · '
+                    f'<span style="color:{pnl_color};font-weight:700;">'
+                    f'{"+" if pnl_per_mwh >= 0 else ""}${pnl_per_mwh:,.2f}/MWh {outcome}</span>'
+                    f'</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                fig_proj = go.Figure()
+                fig_proj.add_trace(go.Bar(
+                    x=hours['Hour Ending'], y=hours['DA Price'],
+                    name='DA', marker_color='#AB47BC',
+                    opacity=0.85, width=0.35, offset=-0.18,
+                ))
+
+                proj_rt = hours[['Hour Ending', 'HE', 'RT Price', 'Printed']].copy()
+                proj_rt.loc[~proj_rt['Printed'], 'RT Price'] = needed_avg
+
+                printed_proj = proj_rt[proj_rt['Printed']]
+                if not printed_proj.empty:
+                    fig_proj.add_trace(go.Bar(
+                        x=printed_proj['Hour Ending'], y=printed_proj['RT Price'],
+                        name='RT (Actual)', marker_color='#42A5F5',
+                        opacity=0.85, width=0.35, offset=0.18,
+                    ))
+
+                remaining_proj = proj_rt[~proj_rt['Printed']]
+                if not remaining_proj.empty:
+                    fig_proj.add_trace(go.Bar(
+                        x=remaining_proj['Hour Ending'], y=remaining_proj['RT Price'],
+                        name=f'RT (Projected ${needed_avg:,.2f})',
+                        marker_color='rgba(66,165,245,0.35)',
+                        marker_line=dict(color='#42A5F5', width=1.5),
+                        marker_pattern_shape='/',
+                        width=0.35, offset=0.18,
+                    ))
+
+                fig_proj.add_hline(y=da_avg, line_dash="dash", line_color="#AB47BC", line_width=2,
+                                   annotation_text=f"DA Avg ${da_avg:,.2f}", annotation_position="top right",
+                                   annotation_font_color="#AB47BC", annotation_font_size=11)
+                fig_proj.add_hline(y=target_rt_val, line_dash="dot",
+                                   line_color="#4CAF50" if outcome == "profit" else "#FF5252", line_width=2,
+                                   annotation_text=f"Target RT ${target_rt_val:,.2f}",
+                                   annotation_position="bottom right",
+                                   annotation_font_color="#4CAF50" if outcome == "profit" else "#FF5252",
+                                   annotation_font_size=11)
+                fig_proj.add_hline(y=needed_avg, line_dash="dash", line_color="#FFD54F", line_width=1.5,
+                                   annotation_text=f"Needed Avg ${needed_avg:,.2f}", annotation_position="top left",
+                                   annotation_font_color="#FFD54F", annotation_font_size=11)
+
+                if onpk_start <= active_he <= onpk_end:
+                    add_now_line(fig_proj, active_he)
+
+                onpk_he_labels = [f'HE{h:02}' for h in range(onpk_start, onpk_end + 1)]
+                fig_proj.update_layout(
+                    title=f"Projected Scenario — RT settles at ${target_rt_val:,.2f}",
+                    yaxis=dict(title='$/MWh'),
+                    xaxis=dict(title='Hour Ending', tickvals=onpk_he_labels, tickangle=0,
+                               categoryorder='array', categoryarray=onpk_he_labels),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    barmode='group', height=450, hovermode='x',
+                    bargap=0.15, bargroupgap=0.02,
+                )
+                fig_proj.update_traces(hovertemplate='%{x}: $%{y:,.2f}<extra>%{fullData.name}</extra>')
+                st.plotly_chart(fig_proj, use_container_width=True)
+
+
 def main():
     check_password()
     st.title("Fundies")
     try:
-        tab1, tab2, tab5, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Gas", "News"])
+        tab1, tab2, tab5, tab6, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Bal-Day Calc", "Gas", "News"])
         with st.spinner("Loading forecast data..."):
             cache_time = get_cache_time()
             result = fetch_forecast_data(cache_time)
@@ -2855,6 +3670,13 @@ def main():
                             disp[c] = disp[c].apply(lambda x: f'{int(float(x)):,}' if pd.notna(x) else '')
                     st.dataframe(disp, use_container_width=True, hide_index=True)
 
+        # Tab 6 - Bal-Day Calc
+        with tab6:
+            from zoneinfo import ZoneInfo
+            now_ct_balday = datetime.now(ZoneInfo('America/Chicago'))
+            current_he_balday = now_ct_balday.hour + 1
+            _render_balday(now_ct_balday, current_he_balday, cache_time)
+
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
         import traceback
@@ -2862,4 +3684,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
