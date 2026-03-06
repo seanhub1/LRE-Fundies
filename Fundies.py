@@ -1521,61 +1521,345 @@ def _fetch_pjm_rt(today_str, cache_buster):
 
     return pd.DataFrame(), debug
 
-@st.cache_data(ttl=86400)
-def _fetch_ercot_historical_dart(cache_date_str):
-    """Fetch 365 days of ERCOT DA + RT hourly for HB_NORTH, return per-hour DART."""
-    headers = _balday_ercot_token()
+# ─── Gist-based persistent DART cache ───────────────────────────────────────
+
+DART_GIST_FILENAME_ERCOT = "ercot_dart_cache.json"
+DART_GIST_FILENAME_PJM = "pjm_dart_cache.json"
+
+
+def _load_dart_cache_from_gist(filename):
+    """Load cached DART history from GitHub Gist."""
+    try:
+        gist_token = st.secrets.get("gist", {}).get("token")
+        gist_id = st.secrets.get("gist", {}).get("dart_gist_id") or st.secrets.get("gist", {}).get("id")
+        if not gist_token or not gist_id:
+            return None, None
+        url = f"https://api.github.com/gists/{gist_id}"
+        headers = {
+            "Authorization": f"token {gist_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.ok:
+            gist_data = resp.json()
+            file_info = gist_data.get("files", {}).get(filename)
+            if file_info and file_info.get("content"):
+                cache = json.loads(file_info["content"])
+                df = pd.DataFrame(cache["data"])
+                if not df.empty:
+                    df['date'] = pd.to_datetime(df['date'])
+                last_date = cache.get("last_date")
+                return df, last_date
+    except Exception as e:
+        pass
+    return None, None
+
+
+def _save_dart_cache_to_gist(df, filename):
+    """Upload DART cache to GitHub Gist."""
+    try:
+        gist_token = st.secrets.get("gist", {}).get("token")
+        gist_id = st.secrets.get("gist", {}).get("dart_gist_id") or st.secrets.get("gist", {}).get("id")
+        if not gist_token or not gist_id:
+            return False
+        cutoff = datetime.now() - timedelta(days=400)
+        df_save = df[df['date'] >= cutoff].copy()
+        cache_payload = {
+            "last_date": df_save['date'].max().strftime('%Y-%m-%d'),
+            "row_count": len(df_save),
+            "updated_at": datetime.now().isoformat(),
+            "data": df_save.to_dict(orient='records'),
+        }
+        for row in cache_payload["data"]:
+            if isinstance(row.get('date'), (pd.Timestamp, datetime)):
+                row['date'] = row['date'].strftime('%Y-%m-%d')
+        url = f"https://api.github.com/gists/{gist_id}"
+        headers = {
+            "Authorization": f"token {gist_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        payload = {
+            "files": {
+                filename: {
+                    "content": json.dumps(cache_payload, default=str)
+                }
+            }
+        }
+        resp = requests.patch(url, headers=headers, json=payload, timeout=60)
+        return resp.ok
+    except Exception as e:
+        return False
+
+
+# ─── Chunked ERCOT historical fetchers ──────────────────────────────────────
+
+def _hist_ercot_api_headers():
+    """Get ERCOT API auth headers for historical pulls."""
+    uid = st.secrets["ercot"]["username"]
+    pwd = st.secrets["ercot"]["password"]
+    SUBSCRIPTION = st.secrets["ercot"]["subscription"]
+    AUTH_URL = (
+        "https://ercotb2c.b2clogin.com/"
+        "ercotb2c.onmicrosoft.com/"
+        "B2C_1_PUBAPI-ROPC-FLOW/oauth2/v2.0/token"
+    )
+    data = {
+        'username': uid, 'password': pwd,
+        'scope': 'openid fec253ea-0d06-4272-a5e6-b478baeecd70 offline_access',
+        'client_id': 'fec253ea-0d06-4272-a5e6-b478baeecd70',
+        'response_type': 'id_token', 'grant_type': 'password',
+    }
+    resp = requests.post(AUTH_URL, data=data, timeout=30)
+    if resp.ok:
+        return {
+            "Authorization": "Bearer " + resp.json().get("access_token"),
+            "Ocp-Apim-Subscription-Key": SUBSCRIPTION,
+        }
+    return None
+
+
+def _fetch_ercot_da_chunk(headers, start_date, end_date, max_retries=3):
+    """Fetch ERCOT DA prices for HB_NORTH in a date range (max ~30 days)."""
+    url = "https://api.ercot.com/api/public-reports/np4-190-cd/dam_stlmnt_pnt_prices"
+    params = {
+        'deliveryDateFrom': start_date,
+        'deliveryDateTo': end_date,
+        'settlementPoint': 'HB_NORTH',
+        'DSTFlag': 'false',
+        'size': 50000,
+    }
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=60)
+            if resp.status_code == 200:
+                rows = resp.json().get('data', [])
+                if rows:
+                    df = pd.DataFrame(rows, columns=[
+                        "deliveryDate", "hourEnding", "settlementPoint",
+                        "settlementPointPrice", "DSTFlag"
+                    ])
+                    df['date'] = df['deliveryDate']
+                    df['HE'] = df['hourEnding'].str[:2].astype(int)
+                    df['DA'] = pd.to_numeric(df['settlementPointPrice'], errors='coerce')
+                    return df[['date', 'HE', 'DA']].dropna()
+            elif resp.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+        except requests.exceptions.Timeout:
+            time.sleep(3 * (attempt + 1))
+        except Exception:
+            break
+    return pd.DataFrame()
+
+
+def _fetch_ercot_rt_chunk(headers, start_date, end_date, max_retries=3):
+    """Fetch ERCOT RT 15-min prices for HB_NORTH, averaged to hourly."""
+    url = "https://api.ercot.com/api/public-reports/np6-905-cd/spp_node_zone_hub"
+    params = {
+        'deliveryDateFrom': start_date,
+        'deliveryDateTo': end_date,
+        'settlementPoint': 'HB_NORTH',
+        'DSTFlag': 'false',
+        'size': 200000,
+    }
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=90)
+            if resp.status_code == 200:
+                data_json = resp.json()
+                rows = data_json.get('data', [])
+                fields = data_json.get('fields', [])
+                if rows and fields:
+                    col_names = [f.get('name') or f.get('label') for f in fields]
+                    df = pd.DataFrame(rows, columns=col_names)
+                    df['date'] = df['deliveryDate'].astype(str)
+                    df['HE'] = pd.to_numeric(df['deliveryHour'], errors='coerce').astype(int)
+                    df['RT'] = pd.to_numeric(df['settlementPointPrice'], errors='coerce')
+                    return df.groupby(['date', 'HE'])['RT'].mean().reset_index()
+            elif resp.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+        except requests.exceptions.Timeout:
+            time.sleep(3 * (attempt + 1))
+        except Exception:
+            break
+    return pd.DataFrame()
+
+
+def _fetch_ercot_dart_chunked(start_date_str, end_date_str, progress_bar=None):
+    """Fetch ERCOT DART in 30-day chunks between start_date and end_date."""
+    headers = _hist_ercot_api_headers()
     if not headers:
         return pd.DataFrame()
 
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+    start = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end = datetime.strptime(end_date_str, '%Y-%m-%d')
 
-    da_url = "https://api.ercot.com/api/public-reports/np4-190-cd/dam_stlmnt_pnt_prices"
-    da_params = {
-        'deliveryDateFrom': start_date, 'deliveryDateTo': end_date,
-        'settlementPoint': 'HB_NORTH', 'DSTFlag': 'false', 'size': 2000000,
-    }
-    try:
-        resp = requests.get(da_url, headers=headers, params=da_params, timeout=120)
-        if resp.status_code != 200:
-            return pd.DataFrame()
-        da_rows = resp.json().get('data', [])
-        if not da_rows:
-            return pd.DataFrame()
-        da_df = pd.DataFrame(da_rows,
-            columns=["deliveryDate","hourEnding","settlementPoint","settlementPointPrice","DSTFlag"])
-        da_df['date'] = da_df['deliveryDate']
-        da_df['HE'] = da_df['hourEnding'].str[:2].astype(int)
-        da_df['DA'] = pd.to_numeric(da_df['settlementPointPrice'], errors='coerce')
-        da_df = da_df[['date', 'HE', 'DA']].dropna()
-    except Exception:
+    all_da = []
+    all_rt = []
+    current = start
+    chunk_num = 0
+    total_chunks = ((end - start).days // 30) + 1
+
+    while current.date() <= end.date():
+        chunk_end = min(current + timedelta(days=29), end)
+        cs = current.strftime('%Y-%m-%d')
+        ce = chunk_end.strftime('%Y-%m-%d')
+
+        if progress_bar:
+            progress_bar.progress(
+                min(chunk_num / total_chunks, 1.0),
+                text=f"Fetching {cs} to {ce}..."
+            )
+
+        da_chunk = _fetch_ercot_da_chunk(headers, cs, ce)
+        if not da_chunk.empty:
+            all_da.append(da_chunk)
+
+        rt_chunk = _fetch_ercot_rt_chunk(headers, cs, ce)
+        if not rt_chunk.empty:
+            all_rt.append(rt_chunk)
+
+        time.sleep(0.5)
+        current = chunk_end + timedelta(days=1)
+        chunk_num += 1
+
+    if not all_da or not all_rt:
         return pd.DataFrame()
 
-    rt_url = "https://api.ercot.com/api/public-reports/np6-905-cd/spp_node_zone_hub"
-    rt_params = {
-        'deliveryDateFrom': start_date, 'deliveryDateTo': end_date,
-        'settlementPoint': 'HB_NORTH', 'DSTFlag': 'false', 'size': 2000000,
-    }
-    try:
-        resp = requests.get(rt_url, headers=headers, params=rt_params, timeout=120)
-        if resp.status_code != 200:
-            return pd.DataFrame()
-        data_json = resp.json()
-        rt_rows = data_json.get('data', [])
-        fields = data_json.get('fields', [])
-        if not rt_rows or not fields:
-            return pd.DataFrame()
-        col_names = [f.get('name') or f.get('label') for f in fields]
-        rt_df = pd.DataFrame(rt_rows, columns=col_names)
-        rt_df['date'] = rt_df['deliveryDate'].astype(str)
-        rt_df['HE'] = pd.to_numeric(rt_df['deliveryHour'], errors='coerce').astype(int)
-        rt_df['RT'] = pd.to_numeric(rt_df['settlementPointPrice'], errors='coerce')
-        rt_df = rt_df.groupby(['date', 'HE'])['RT'].mean().reset_index()
-    except Exception:
-        return pd.DataFrame()
+    da_df = pd.concat(all_da, ignore_index=True)
+    rt_df = pd.concat(all_rt, ignore_index=True)
 
     merged = da_df.merge(rt_df, on=['date', 'HE'], how='inner')
+    merged['DART'] = merged['DA'] - merged['RT']
+    merged['date'] = pd.to_datetime(merged['date'])
+    merged['doy'] = merged['date'].dt.dayofyear
+    return merged[['date', 'doy', 'HE', 'DA', 'RT', 'DART']]
+
+
+@st.cache_data(ttl=86400)
+def _fetch_ercot_historical_dart(cache_date_str):
+    """Fetch 365 days of ERCOT DA + RT hourly for HB_NORTH, return per-hour DART.
+    Uses Gist cache — only fetches missing days incrementally."""
+    today = datetime.now().date()
+    target_start = (today - timedelta(days=365)).strftime('%Y-%m-%d')
+
+    cached_df, last_cached_date = _load_dart_cache_from_gist(DART_GIST_FILENAME_ERCOT)
+
+    if cached_df is not None and not cached_df.empty and last_cached_date:
+        last_date = datetime.strptime(last_cached_date, '%Y-%m-%d').date()
+        days_missing = (today - last_date).days
+
+        if days_missing <= 1:
+            return cached_df
+
+        if days_missing <= 60:
+            fetch_start = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
+            fetch_end = today.strftime('%Y-%m-%d')
+
+            new_data = _fetch_ercot_dart_chunked(fetch_start, fetch_end)
+
+            if not new_data.empty:
+                combined = pd.concat([cached_df, new_data], ignore_index=True)
+                combined = combined.drop_duplicates(subset=['date', 'HE'], keep='last')
+                cutoff = pd.Timestamp(today - timedelta(days=400))
+                combined = combined[combined['date'] >= cutoff]
+                combined = combined.sort_values(['date', 'HE']).reset_index(drop=True)
+                _save_dart_cache_to_gist(combined, DART_GIST_FILENAME_ERCOT)
+                return combined
+            else:
+                return cached_df
+
+    progress = st.progress(0, text="Building ERCOT DART cache (one-time, ~2 min)...")
+    full_data = _fetch_ercot_dart_chunked(target_start, today.strftime('%Y-%m-%d'), progress)
+    progress.empty()
+
+    if not full_data.empty:
+        _save_dart_cache_to_gist(full_data, DART_GIST_FILENAME_ERCOT)
+
+    return full_data
+
+
+# ─── Chunked PJM historical fetchers ────────────────────────────────────────
+
+def _hist_pjm_api_call(url, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            result = requests.get(url, headers=_balday_pjm_headers(), timeout=(30, 90))
+            if result.ok:
+                return result.json()
+            if result.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+            if result.status_code == 400:
+                return None
+        except requests.exceptions.RequestException:
+            if attempt < max_retries - 1:
+                time.sleep(3 * (attempt + 1))
+    return None
+
+
+def _fetch_pjm_dart_chunked(start_date_str, end_date_str, progress_bar=None):
+    """Fetch PJM DART in 30-day chunks."""
+    from urllib.parse import quote
+
+    start = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end = datetime.strptime(end_date_str, '%Y-%m-%d')
+
+    all_da = []
+    all_rt = []
+    current = start
+    chunk_num = 0
+    total_chunks = ((end - start).days // 30) + 1
+
+    while current.date() <= end.date():
+        chunk_end = min(current + timedelta(days=29), end)
+        date_range = f"{current.strftime('%Y-%m-%d')} 00:00 to {chunk_end.strftime('%Y-%m-%d')} 23:59"
+
+        if progress_bar:
+            progress_bar.progress(
+                min(chunk_num / total_chunks, 1.0),
+                text=f"Fetching {current.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')}..."
+            )
+
+        params = {
+            'datetime_beginning_ept': date_range,
+            'pnode_id': PJM_WESTERN_HUB_ID,
+            'rowCount': 50000, 'startRow': 1,
+        }
+        param_str = '&'.join([f"{k}={quote(str(v))}" for k, v in params.items()])
+
+        da_json = _hist_pjm_api_call(f"https://api.pjm.com/api/v1/da_hrl_lmps?{param_str}")
+        if da_json and da_json.get('items'):
+            da_df = pd.DataFrame(da_json['items'])
+            da_df['datetime'] = pd.to_datetime(da_df['datetime_beginning_ept'])
+            da_df['date'] = da_df['datetime'].dt.strftime('%Y-%m-%d')
+            da_df['HE'] = da_df['datetime'].dt.hour + 1
+            da_df['DA'] = pd.to_numeric(da_df['total_lmp_da'], errors='coerce')
+            all_da.append(da_df[['date', 'HE', 'DA']].dropna())
+
+        time.sleep(0.5)
+
+        rt_json = _hist_pjm_api_call(f"https://api.pjm.com/api/v1/rt_hrl_lmps?{param_str}")
+        if rt_json and rt_json.get('items'):
+            rt_df = pd.DataFrame(rt_json['items'])
+            rt_df['datetime'] = pd.to_datetime(rt_df['datetime_beginning_ept'])
+            rt_df['date'] = rt_df['datetime'].dt.strftime('%Y-%m-%d')
+            rt_df['HE'] = rt_df['datetime'].dt.hour + 1
+            rt_df['RT'] = pd.to_numeric(rt_df['total_lmp_rt'], errors='coerce')
+            all_rt.append(rt_df[['date', 'HE', 'RT']].dropna())
+
+        time.sleep(0.5)
+        current = chunk_end + timedelta(days=1)
+        chunk_num += 1
+
+    if not all_da or not all_rt:
+        return pd.DataFrame()
+
+    da_all = pd.concat(all_da, ignore_index=True)
+    rt_all = pd.concat(all_rt, ignore_index=True)
+
+    merged = da_all.merge(rt_all, on=['date', 'HE'], how='inner')
     merged['DART'] = merged['DA'] - merged['RT']
     merged['date'] = pd.to_datetime(merged['date'])
     merged['doy'] = merged['date'].dt.dayofyear
@@ -1584,73 +1868,45 @@ def _fetch_ercot_historical_dart(cache_date_str):
 
 @st.cache_data(ttl=86400)
 def _fetch_pjm_historical_dart(cache_date_str):
-    """Fetch 365 days of PJM DA + RT hourly for WESTERN HUB, return per-hour DART."""
-    from urllib.parse import quote
+    """Fetch 365 days of PJM DA + RT hourly for WESTERN HUB, return per-hour DART.
+    Uses Gist cache — only fetches missing days incrementally."""
+    today = datetime.now().date()
+    target_start = (today - timedelta(days=365)).strftime('%Y-%m-%d')
 
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_dt = datetime.now() - timedelta(days=365)
+    cached_df, last_cached_date = _load_dart_cache_from_gist(DART_GIST_FILENAME_PJM)
 
-    all_da = []
-    current = start_dt
-    while current.date() <= datetime.now().date():
-        chunk_end = min(current + timedelta(days=30), datetime.now())
-        date_range = f"{current.strftime('%Y-%m-%d')} 00:00 to {chunk_end.strftime('%Y-%m-%d')} 23:59"
-        params = {
-            'datetime_beginning_ept': date_range,
-            'pnode_id': PJM_WESTERN_HUB_ID,
-            'rowCount': 50000, 'startRow': 1,
-        }
-        param_str = '&'.join([f"{k}={quote(str(v))}" for k, v in params.items()])
-        url = f"https://api.pjm.com/api/v1/da_hrl_lmps?{param_str}"
-        data_json = _balday_pjm_api_call(url)
-        if data_json and data_json.get('items'):
-            all_da.extend(data_json['items'])
-        current = chunk_end + timedelta(days=1)
-        time.sleep(0.5)
+    if cached_df is not None and not cached_df.empty and last_cached_date:
+        last_date = datetime.strptime(last_cached_date, '%Y-%m-%d').date()
+        days_missing = (today - last_date).days
 
-    if not all_da:
-        return pd.DataFrame()
+        if days_missing <= 1:
+            return cached_df
 
-    da_df = pd.DataFrame(all_da)
-    da_df['datetime'] = pd.to_datetime(da_df['datetime_beginning_ept'])
-    da_df['date'] = da_df['datetime'].dt.strftime('%Y-%m-%d')
-    da_df['HE'] = da_df['datetime'].dt.hour + 1
-    da_df['DA'] = pd.to_numeric(da_df['total_lmp_da'], errors='coerce')
-    da_df = da_df[['date', 'HE', 'DA']].dropna()
+        if days_missing <= 60:
+            fetch_start = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
+            fetch_end = today.strftime('%Y-%m-%d')
 
-    all_rt = []
-    current = start_dt
-    while current.date() <= datetime.now().date():
-        chunk_end = min(current + timedelta(days=30), datetime.now())
-        date_range = f"{current.strftime('%Y-%m-%d')} 00:00 to {chunk_end.strftime('%Y-%m-%d')} 23:59"
-        params = {
-            'datetime_beginning_ept': date_range,
-            'pnode_id': PJM_WESTERN_HUB_ID,
-            'rowCount': 50000, 'startRow': 1,
-        }
-        param_str = '&'.join([f"{k}={quote(str(v))}" for k, v in params.items()])
-        url = f"https://api.pjm.com/api/v1/rt_hrl_lmps?{param_str}"
-        data_json = _balday_pjm_api_call(url)
-        if data_json and data_json.get('items'):
-            all_rt.extend(data_json['items'])
-        current = chunk_end + timedelta(days=1)
-        time.sleep(0.5)
+            new_data = _fetch_pjm_dart_chunked(fetch_start, fetch_end)
 
-    if not all_rt:
-        return pd.DataFrame()
+            if not new_data.empty:
+                combined = pd.concat([cached_df, new_data], ignore_index=True)
+                combined = combined.drop_duplicates(subset=['date', 'HE'], keep='last')
+                cutoff = pd.Timestamp(today - timedelta(days=400))
+                combined = combined[combined['date'] >= cutoff]
+                combined = combined.sort_values(['date', 'HE']).reset_index(drop=True)
+                _save_dart_cache_to_gist(combined, DART_GIST_FILENAME_PJM)
+                return combined
+            else:
+                return cached_df
 
-    rt_df = pd.DataFrame(all_rt)
-    rt_df['datetime'] = pd.to_datetime(rt_df['datetime_beginning_ept'])
-    rt_df['date'] = rt_df['datetime'].dt.strftime('%Y-%m-%d')
-    rt_df['HE'] = rt_df['datetime'].dt.hour + 1
-    rt_df['RT'] = pd.to_numeric(rt_df['total_lmp_rt'], errors='coerce')
-    rt_df = rt_df[['date', 'HE', 'RT']].dropna()
+    progress = st.progress(0, text="Building PJM DART cache (one-time, ~3 min)...")
+    full_data = _fetch_pjm_dart_chunked(target_start, today.strftime('%Y-%m-%d'), progress)
+    progress.empty()
 
-    merged = da_df.merge(rt_df, on=['date', 'HE'], how='inner')
-    merged['DART'] = merged['DA'] - merged['RT']
-    merged['date'] = pd.to_datetime(merged['date'])
-    merged['doy'] = merged['date'].dt.dayofyear
-    return merged[['date', 'doy', 'HE', 'DA', 'RT', 'DART']]
+    if not full_data.empty:
+        _save_dart_cache_to_gist(full_data, DART_GIST_FILENAME_PJM)
+
+    return full_data
 
 
 def _seasonal_weights(hist_doy, today_doy, halflife=30):
