@@ -2442,6 +2442,8 @@ def _render_balday(now_ct, current_he, cache_time):
 
 def main():
     check_password()
+    _fetch_ercot_historical_dart.clear()
+    _fetch_pjm_historical_dart.clear()
     st.title("Fundies")
     try:
         tab1, tab2, tab5, tab6, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Bal-Day Calc", "Gas", "News"])
@@ -4094,3 +4096,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
