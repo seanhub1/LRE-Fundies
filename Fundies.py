@@ -1063,7 +1063,7 @@ def fetch_x_feed(username, feed_config, _cache_time):
         except Exception:
             continue
 
-    # Method 2: Fallback - Google News search for the account's posts
+    
     if not articles:
         try:
             query = f"from:{username} site:x.com when:3d"
@@ -1095,7 +1095,7 @@ def fetch_x_feed(username, feed_config, _cache_time):
     return articles
 
 def parse_rss_date(date_str):
-    """Parse RSS pubDate string to datetime."""
+    
     try:
         from email.utils import parsedate_to_datetime
         return parsedate_to_datetime(date_str)
@@ -1103,7 +1103,7 @@ def parse_rss_date(date_str):
         return datetime.min.replace(tzinfo=None)
 
 def format_relative_time(dt):
-    """Format a datetime as relative time string."""
+    
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo('UTC'))
@@ -1416,7 +1416,8 @@ def _balday_pjm_api_call(url, max_retries=3):
 
 @st.cache_data(ttl=86400)
 def _fetch_ercot_da(today_str):
-    """Fetch today's ERCOT DA SPP for HB_NORTH."""
+    return pd.DataFrame()
+    
     headers = _balday_ercot_token()
     if not headers:
         return pd.DataFrame()
@@ -4096,4 +4097,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
