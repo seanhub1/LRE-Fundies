@@ -1494,7 +1494,8 @@ def _yes_fetch(url, max_retries=3):
 
 
 def _yes_dalmp(node, date_str):
-    url = (f"{YES_BASE}/timeseries/DALMP/{node}"
+    encoded_node = quote(node)
+    url = (f"{YES_BASE}/timeseries/DALMP/{encoded_node}"
            f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
     df = _yes_fetch(url)
     if df is None or df.empty:
@@ -1507,7 +1508,8 @@ def _yes_dalmp(node, date_str):
 
 
 def _yes_rtlmp(node, date_str):
-    url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
+    encoded_node = quote(node)
+    url = (f"{YES_BASE}/timeseries/RTLMP/{encoded_node}"
            f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
     df = _yes_fetch(url)
     if df is None or df.empty:
@@ -1520,9 +1522,10 @@ def _yes_rtlmp(node, date_str):
 
 
 def _yes_hist_dart(node, start_date, end_date):
-    da_url = (f"{YES_BASE}/timeseries/DALMP/{node}"
+    encoded_node = quote(node)
+    da_url = (f"{YES_BASE}/timeseries/DALMP/{encoded_node}"
               f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
-    rt_url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
+    rt_url = (f"{YES_BASE}/timeseries/RTLMP/{encoded_node}"
               f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
     da_df = _yes_fetch(da_url)
     rt_df = _yes_fetch(rt_url)
@@ -1549,13 +1552,22 @@ def _yes_hist_dart(node, start_date, end_date):
 @st.cache_data(ttl=86400)
 def _bd_fetch_today_da(iso, today_str):
     node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
-    return _yes_dalmp(node, today_str)
+    df = _yes_dalmp(node, today_str)
+    if df.empty:
+        # Don't cache empty results -- clear this entry so next load retries
+        _bd_fetch_today_da.clear()
+        return pd.DataFrame(columns=['HE', 'DA Price'])
+    return df
 
 
 @st.cache_data(ttl=960)
 def _bd_fetch_today_rt(iso, today_str):
     node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
-    return _yes_rtlmp(node, today_str)
+    df = _yes_rtlmp(node, today_str)
+    if df.empty:
+        _bd_fetch_today_rt.clear()
+        return pd.DataFrame(columns=['HE', 'RT Price'])
+    return df
 
 
 def _bd_load_parquet(path):
