@@ -1583,12 +1583,92 @@ def _bd_fetch_today_da(iso, today_str):
 
 
 def _bd_fetch_today_rt(iso, today_str):
-    """Fetch RT prices from YES Energy (called only on Refresh button click)."""
-    node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
-    df = _yes_rtlmp(node, today_str)
-    if df.empty:
+    """Fetch RT prices from native ISO APIs (called only on Refresh button click).
+    ERCOT: np6-905-cd SPP 15-min data for HB_NORTH, averaged to hourly.
+    PJM: rt_fivemin_hrl_lmps 5-min data for Western Hub (pnode 51217), averaged to hourly.
+    """
+    if iso == "ERCOT":
+        return _ercot_rt_spp(today_str)
+    else:
+        return _pjm_rt_5min(today_str)
+
+
+def _ercot_rt_spp(today_str):
+    """Fetch ERCOT 15-min RT SPP for HB_NORTH, average to hourly."""
+    auths = ercot_token()
+    if not auths:
         return None
-    return df
+    url = (
+        f"https://api.ercot.com/api/public-reports/np6-905-cd/spp_node_zone_hub"
+        f"?deliveryDateFrom={today_str}&deliveryDateTo={today_str}"
+        f"&settlementPoint=HB_NORTH"
+    )
+    try:
+        all_data = []
+        page = 1
+        while True:
+            page_url = f"{url}&page={page}&size=1000"
+            resp = requests.get(page_url, headers=auths, timeout=60)
+            if not resp.ok:
+                break
+            result = resp.json()
+            rows = result.get("data", [])
+            if not rows:
+                break
+            fields = [f['name'] for f in result.get("fields", [])]
+            all_data.extend(rows)
+            meta = result.get("_meta", {})
+            if page >= meta.get("totalPages", 1):
+                break
+            page += 1
+        if not all_data:
+            return None
+        df = pd.DataFrame(all_data, columns=fields if fields else None)
+        if 'settlementPointPrice' not in df.columns:
+            return None
+        df['deliveryHour'] = pd.to_numeric(df['deliveryHour'], errors='coerce').astype(int)
+        df['settlementPointPrice'] = pd.to_numeric(df['settlementPointPrice'], errors='coerce')
+        # Average all 15-min intervals within each hour
+        hourly = df.groupby('deliveryHour')['settlementPointPrice'].mean().reset_index()
+        hourly.columns = ['HE', 'RT Price']
+        return hourly.sort_values('HE').reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def _pjm_rt_5min(today_str):
+    """Fetch PJM 5-min RT LMP for Western Hub (pnode 51217), average to hourly."""
+    pjm_headers = {
+        'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
+    }
+    # Western Hub pnode_id = 51217
+    url = (
+        f"https://api.pjm.com/api/v1/rt_fivemin_hrl_lmps"
+        f"?download=true&rowCount=50000"
+        f"&sort=datetime_beginning_ept&order=Asc&startRow=1"
+        f"&datetime_beginning_ept={today_str}%2000:00to{today_str}%2023:59"
+        f"&pnode_id=51217"
+        f"&fields=datetime_beginning_ept,total_lmp_rt,pnode_id"
+    )
+    try:
+        resp = requests.get(url, headers=pjm_headers, timeout=120)
+        if not resp.ok:
+            return None
+        data = resp.json()
+        if not data:
+            return None
+        df = pd.json_normalize(data)
+        if df.empty or 'total_lmp_rt' not in df.columns:
+            return None
+        df['datetime_beginning_ept'] = pd.to_datetime(df['datetime_beginning_ept'])
+        df['HE'] = df['datetime_beginning_ept'].dt.hour + 1
+        df['total_lmp_rt'] = pd.to_numeric(df['total_lmp_rt'], errors='coerce')
+        # Average all 5-min intervals within each hour
+        hourly = df.groupby('HE')['total_lmp_rt'].mean().reset_index()
+        hourly.columns = ['HE', 'RT Price']
+        return hourly.sort_values('HE').reset_index(drop=True)
+    except Exception:
+        return None
 
 
 def _bd_load_parquet(path):
@@ -1848,6 +1928,7 @@ def render_balday_tab(now_ct=None):
                 else:
                     st.session_state[rt_key] = fresh_rt.sort_values('HE')
                 st.session_state[rt_ts_key] = now_ct.strftime('%I:%M:%S %p CT')
+                st.rerun()
     with col_ts:
         last_rt_update = st.session_state.get(rt_ts_key, "Not yet refreshed")
         st.caption(f"RT last updated: {last_rt_update}")
