@@ -11,10 +11,12 @@ from pathlib import Path
 import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
-from io import BytesIO
+from io import BytesIO, StringIO
 import xml.etree.ElementTree as ET
 from html import unescape
 import re
+from urllib.parse import quote
+import logging
 from gridstatus import Ercot as GridStatusErcot
 from gridstatus.ercot import ERCOTSevenDayLoadForecastReport
 from zoneinfo import ZoneInfo
@@ -1372,11 +1374,598 @@ def fetch_reserve_data(cache_time):
 
 
 
+# ==============================================================================
+#  BAL-DAY CALCULATOR
+# ==============================================================================
+
+_balday_logger = logging.getLogger(__name__)
+
+CPT_BD = ZoneInfo("America/Chicago")
+EPT_BD = ZoneInfo("America/New_York")
+
+ERCOT_ONPEAK = (7, 22)
+PJM_ONPEAK   = (8, 23)
+
+# Repo path (committed parquet files, read-only on Streamlit Cloud)
+_REPO_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "balday_cache"
+# Writable path (for appending new days during a session)
+_WORK_DIR = Path("/tmp/balday_cache")
+_WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+ERCOT_PARQUET_REPO = _REPO_DIR / "ercot_dart.parquet"
+PJM_PARQUET_REPO   = _REPO_DIR / "pjm_dart.parquet"
+ERCOT_PARQUET = _WORK_DIR / "ercot_dart.parquet"
+PJM_PARQUET   = _WORK_DIR / "pjm_dart.parquet"
+
+BALDAY_KEEP_DAYS = 400
+BALDAY_CHUNK     = 7
+BALDAY_SLEEP     = 1.5
+
+YES_AUTH = ('Leeward_YesAPI1', 'LresYsEnergy202%!')
+YES_BASE = 'https://services.yesenergy.com/PS/rest'
+YES_ERCOT_NODE = 'HB_NORTH'
+YES_PJM_NODE   = 'WESTERN HUB'
+
+# Gist filenames for balday parquet persistence
+_GIST_ERCOT_FILE = "balday_ercot_dart.b64"
+_GIST_PJM_FILE   = "balday_pjm_dart.b64"
+
+
+def _bd_gist_download(filename):
+    """Download a parquet file from gist (stored as base64). Returns DataFrame or None."""
+    import base64
+    try:
+        gist_id = st.secrets.get("gist", {}).get("id")
+        gist_token = st.secrets.get("gist", {}).get("token")
+        if not gist_id or not gist_token:
+            return None
+        url = f"https://api.github.com/gists/{gist_id}"
+        headers = {"Authorization": f"token {gist_token}", "Accept": "application/vnd.github.v3+json"}
+        resp = requests.get(url, headers=headers, timeout=30)
+        if not resp.ok:
+            return None
+        files = resp.json().get("files", {})
+        if filename not in files:
+            return None
+        content = files[filename].get("content", "")
+        if not content:
+            return None
+        parquet_bytes = base64.b64decode(content)
+        return pd.read_parquet(BytesIO(parquet_bytes))
+    except Exception:
+        return None
+
+
+def _bd_gist_upload(df, filename):
+    """Upload a parquet DataFrame to gist as base64."""
+    import base64
+    try:
+        gist_id = st.secrets.get("gist", {}).get("id")
+        gist_token = st.secrets.get("gist", {}).get("token")
+        if not gist_id or not gist_token:
+            return False
+        buf = BytesIO()
+        df.to_parquet(buf, index=False, engine='pyarrow', compression='snappy')
+        encoded = base64.b64encode(buf.getvalue()).decode('ascii')
+        url = f"https://api.github.com/gists/{gist_id}"
+        headers = {"Authorization": f"token {gist_token}", "Accept": "application/vnd.github.v3+json"}
+        payload = {"files": {filename: {"content": encoded}}}
+        resp = requests.patch(url, headers=headers, json=payload, timeout=120)
+        return resp.ok
+    except Exception:
+        return False
+
+
+def _bd_seed_parquet(iso):
+    """Cold start: try gist first (freshest), then repo parquet as fallback."""
+    work_path = ERCOT_PARQUET if iso == "ERCOT" else PJM_PARQUET
+    repo_path = ERCOT_PARQUET_REPO if iso == "ERCOT" else PJM_PARQUET_REPO
+    gist_file = _GIST_ERCOT_FILE if iso == "ERCOT" else _GIST_PJM_FILE
+
+    if work_path.exists():
+        return  # Already seeded this session
+
+    # Try gist first
+    gist_df = _bd_gist_download(gist_file)
+    if gist_df is not None and not gist_df.empty:
+        gist_df.to_parquet(work_path, index=False, engine='pyarrow', compression='snappy')
+        return
+
+    # Fall back to repo
+    import shutil
+    if repo_path.exists():
+        shutil.copy2(repo_path, work_path)
+
+
+def _yes_fetch(url, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            r = requests.get(url, auth=YES_AUTH, timeout=30)
+            r.raise_for_status()
+            df = pd.read_html(StringIO(r.text))[0]
+            if 'error' in df.columns or len(df.columns) == 1:
+                time.sleep(5 * (attempt + 1))
+                continue
+            return df
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(5 * (attempt + 1))
+    return None
+
+
+def _yes_dalmp(node, date_str):
+    url = (f"{YES_BASE}/timeseries/DALMP/{node}"
+           f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
+    df = _yes_fetch(url)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['HE', 'DA Price'])
+    df = df[['HOURENDING', 'AVGVALUE']].copy()
+    df.columns = ['HE', 'DA Price']
+    df['HE'] = pd.to_numeric(df['HE'], errors='coerce').astype(int)
+    df['DA Price'] = pd.to_numeric(df['DA Price'], errors='coerce')
+    return df[['HE', 'DA Price']].dropna()
+
+
+def _yes_rtlmp(node, date_str):
+    url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
+           f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
+    df = _yes_fetch(url)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['HE', 'RT Price'])
+    df = df[['HOURENDING', 'AVGVALUE']].copy()
+    df.columns = ['HE', 'RT Price']
+    df['HE'] = pd.to_numeric(df['HE'], errors='coerce').astype(int)
+    df['RT Price'] = pd.to_numeric(df['RT Price'], errors='coerce')
+    return df.groupby('HE')['RT Price'].mean().reset_index()
+
+
+def _yes_hist_dart(node, start_date, end_date):
+    da_url = (f"{YES_BASE}/timeseries/DALMP/{node}"
+              f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
+    rt_url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
+              f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
+    da_df = _yes_fetch(da_url)
+    rt_df = _yes_fetch(rt_url)
+    if da_df is None or da_df.empty:
+        return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
+    da_df = da_df[['MARKETDAY', 'HOURENDING', 'AVGVALUE']].copy()
+    da_df.columns = ['date', 'HE', 'DA']
+    da_df['date'] = pd.to_datetime(da_df['date']).dt.strftime('%Y-%m-%d')
+    da_df['HE'] = pd.to_numeric(da_df['HE'], errors='coerce').astype(int)
+    da_df['DA'] = pd.to_numeric(da_df['DA'], errors='coerce')
+    if rt_df is None or rt_df.empty:
+        da_df['RT'] = np.nan
+        return da_df
+    rt_df = rt_df[['MARKETDAY', 'HOURENDING', 'AVGVALUE']].copy()
+    rt_df.columns = ['date', 'HE', 'RT']
+    rt_df['date'] = pd.to_datetime(rt_df['date']).dt.strftime('%Y-%m-%d')
+    rt_df['HE'] = pd.to_numeric(rt_df['HE'], errors='coerce').astype(int)
+    rt_df['RT'] = pd.to_numeric(rt_df['RT'], errors='coerce')
+    rt_df = rt_df.groupby(['date', 'HE'])['RT'].mean().reset_index()
+    merged = da_df.merge(rt_df, on=['date', 'HE'], how='left')
+    return merged[['date', 'HE', 'DA', 'RT']]
+
+
+@st.cache_data(ttl=86400)
+def _bd_fetch_today_da(iso, today_str):
+    node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
+    return _yes_dalmp(node, today_str)
+
+
+@st.cache_data(ttl=960)
+def _bd_fetch_today_rt(iso, today_str):
+    node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
+    return _yes_rtlmp(node, today_str)
+
+
+def _bd_load_parquet(path):
+    if path.exists():
+        try:
+            df = pd.read_parquet(path)
+            for col in ['date', 'HE', 'DA', 'RT']:
+                if col not in df.columns:
+                    return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
+            return df
+        except Exception:
+            pass
+    return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
+
+
+def _bd_save_parquet(df, path):
+    if df.empty:
+        return
+    cutoff = (datetime.now().date() - timedelta(days=BALDAY_KEEP_DAYS)).strftime('%Y-%m-%d')
+    df = df[df['date'] >= cutoff].copy()
+    df = df.drop_duplicates(subset=['date', 'HE'], keep='last')
+    df = df.sort_values(['date', 'HE']).reset_index(drop=True)
+    df['HE'] = df['HE'].astype('int16')
+    df['DA'] = df['DA'].astype('float32')
+    df['RT'] = df['RT'].astype('float32')
+    df.to_parquet(path, index=False, engine='pyarrow', compression='snappy')
+
+
+def _bd_missing_dates(existing_df, end_dt):
+    start = end_dt - timedelta(days=BALDAY_KEEP_DAYS)
+    all_dates = set(pd.date_range(start, end_dt).strftime('%Y-%m-%d'))
+    if existing_df.empty:
+        return sorted(all_dates)
+    have = set(existing_df['date'].unique())
+    return sorted(all_dates - have)
+
+
+def _bd_chunk_dates(date_list, chunk_size=BALDAY_CHUNK):
+    if not date_list:
+        return []
+    dates = sorted(date_list)
+    chunks, cs, ce = [], dates[0], dates[0]
+    for d in dates[1:]:
+        prev_next = (datetime.strptime(ce, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+        span = (datetime.strptime(d, '%Y-%m-%d') - datetime.strptime(cs, '%Y-%m-%d')).days
+        if d == prev_next and span < chunk_size:
+            ce = d
+        else:
+            chunks.append((cs, ce))
+            cs = ce = d
+    chunks.append((cs, ce))
+    return chunks
+
+
+def _bd_backfill_parquet(iso, parquet_path):
+    # Seed from gist/repo on cold start
+    _bd_seed_parquet(iso)
+
+    yesterday = datetime.now(CPT_BD).date() - timedelta(days=1)
+    existing = _bd_load_parquet(parquet_path)
+    missing = _bd_missing_dates(existing, yesterday)
+    if not missing:
+        return existing
+    chunks = _bd_chunk_dates(missing, BALDAY_CHUNK)
+    node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
+    new_frames = []
+    for i, (cs, ce) in enumerate(chunks):
+        chunk_df = _yes_hist_dart(node, cs, ce)
+        if not chunk_df.empty:
+            new_frames.append(chunk_df)
+        if i < len(chunks) - 1:
+            time.sleep(BALDAY_SLEEP)
+    if new_frames:
+        new_data = pd.concat(new_frames, ignore_index=True)
+        existing = pd.concat([existing, new_data], ignore_index=True) if not existing.empty else new_data
+        _bd_save_parquet(existing, parquet_path)
+        # Upload updated parquet to gist for persistence across server recycles
+        gist_file = _GIST_ERCOT_FILE if iso == "ERCOT" else _GIST_PJM_FILE
+        _bd_gist_upload(existing, gist_file)
+    return _bd_load_parquet(parquet_path)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _bd_ensure_historical(iso, cache_bust_key):
+    path = ERCOT_PARQUET if iso == "ERCOT" else PJM_PARQUET
+    df = _bd_backfill_parquet(iso, path)
+    if df.empty:
+        return pd.DataFrame()
+    df['doy'] = pd.to_datetime(df['date']).dt.dayofyear
+    return df[['date', 'doy', 'HE', 'DA', 'RT']].sort_values(['date', 'HE'])
+
+
+def _bd_seasonal_weights(hist_doy, today_doy, halflife=30):
+    diff = np.abs(np.array(hist_doy) - today_doy)
+    diff = np.minimum(diff, 365 - diff)
+    return np.exp(-0.5 * (diff / halflife) ** 2)
+
+
+def _bd_regime_weights(hist_df, printed_with_da, printed_hes_list):
+    if printed_with_da.empty or not printed_hes_list:
+        return None
+    today_avg_dart = printed_with_da['DART'].mean()
+    result = []
+    for d, grp in hist_df[hist_df['HE'].isin(printed_hes_list)].groupby('date'):
+        hist_dart = (grp['DA'] - grp['RT']).mean()
+        diff = abs(hist_dart - today_avg_dart)
+        weight = np.exp(-0.5 * (diff / 10.0) ** 2)
+        result.append({'date': d, 'regime_weight': weight})
+    return pd.DataFrame(result) if result else None
+
+
+def _bd_run_monte_carlo(hist_df, remaining_hes, rt_printed_sum, n_printed,
+                        onpk_hours, today_doy, printed_with_da, printed_hes_list,
+                        n_sims=10000):
+    if hist_df.empty or not remaining_hes:
+        return np.array([])
+    hist_df = hist_df.dropna(subset=['RT'])
+    if hist_df.empty:
+        return np.array([])
+    date_info = hist_df.groupby('date')['doy'].first().reset_index()
+    date_info['seasonal_wt'] = _bd_seasonal_weights(date_info['doy'].values, today_doy)
+    regime_df = _bd_regime_weights(hist_df, printed_with_da, printed_hes_list)
+    if regime_df is not None:
+        date_info = date_info.merge(regime_df, on='date', how='left')
+        date_info['regime_weight'] = date_info['regime_weight'].fillna(0.1)
+    else:
+        date_info['regime_weight'] = 1.0
+    date_info['combined_wt'] = (
+        date_info['seasonal_wt'] * 0.4 + date_info['regime_weight'] * 0.6
+    ).clip(lower=0.01)
+    date_weight_map = dict(zip(date_info['date'], date_info['combined_wt']))
+    rng = np.random.default_rng()
+    sim_remaining = np.zeros(n_sims)
+    for he in remaining_hes:
+        he_data = hist_df[hist_df['HE'] == he]
+        if he_data.empty:
+            continue
+        wts = np.array([date_weight_map.get(d, 0.01) for d in he_data['date'].values])
+        s = wts.sum()
+        if s == 0:
+            continue
+        wts = wts / s
+        samples = rng.choice(he_data['RT'].values, size=n_sims, p=wts)
+        sim_remaining += samples
+    return (rt_printed_sum + sim_remaining) / onpk_hours
+
+
+def _bd_render_probability(iso_choice, da_avg, rt_printed_sum, rt_printed_avg,
+                           n_printed, n_remaining, onpk_hours, onpk_start, onpk_end,
+                           active_he, is_long, hours, now_ct, printed_with_da):
+    cache_key = now_ct.strftime('%Y-%m-%d')
+    with st.spinner(f"Loading {iso_choice} historical data..."):
+        hist = _bd_ensure_historical(iso_choice, cache_key)
+    if hist.empty:
+        st.warning("Could not load historical data for probability analysis.")
+        return
+    today_doy = now_ct.timetuple().tm_yday
+    remaining_hes = hours[~hours['Printed']]['HE'].tolist()
+    printed_hes_list = hours[hours['Printed']]['HE'].tolist()
+    if not remaining_hes:
+        return
+    sim_rt_avg = _bd_run_monte_carlo(
+        hist, remaining_hes, rt_printed_sum, n_printed,
+        onpk_hours, today_doy, printed_with_da, printed_hes_list)
+    if len(sim_rt_avg) == 0:
+        st.warning("Insufficient historical data for simulation.")
+        return
+    sim_dart = da_avg - sim_rt_avg
+    prob_da_over_rt = (sim_dart > 0).mean() * 100
+    prob_rt_over_da = (sim_dart < 0).mean() * 100
+    your_prob  = prob_rt_over_da if is_long else prob_da_over_rt
+    your_label = "RT outperforms DA" if is_long else "DA outperforms RT"
+    prob_color = "#4CAF50" if your_prob >= 65 else ("#FFD54F" if your_prob >= 45 else "#FF5252")
+    p10, p50, p90 = np.percentile(sim_rt_avg, [10, 50, 90])
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(
+        f'<div style="text-align:center;padding:10px;">'
+        f'<div style="color:#888;font-size:12px;margin-bottom:4px;">'
+        f'Your Position ({"Long" if is_long else "Short"})</div>'
+        f'<div style="color:{prob_color};font-size:36px;font-weight:700;">{your_prob:.0f}%</div>'
+        f'<div style="color:#aaa;font-size:12px;">{your_label}</div></div>',
+        unsafe_allow_html=True)
+    c2.markdown(
+        f'<div style="text-align:center;padding:10px;">'
+        f'<div style="color:#888;font-size:12px;margin-bottom:4px;">Median RT Settle</div>'
+        f'<div style="color:#fff;font-size:28px;font-weight:700;">${p50:,.2f}</div>'
+        f'<div style="color:#aaa;font-size:12px;">DA Avg: ${da_avg:,.2f}</div></div>',
+        unsafe_allow_html=True)
+    c3.markdown(
+        f'<div style="text-align:center;padding:10px;">'
+        f'<div style="color:#888;font-size:12px;margin-bottom:4px;">80% Range</div>'
+        f'<div style="color:#fff;font-size:22px;font-weight:700;">${p10:,.0f} - ${p90:,.0f}</div>'
+        f'<div style="color:#aaa;font-size:12px;">10th - 90th pctile</div></div>',
+        unsafe_allow_html=True)
+    fig_hist = go.Figure()
+    fig_hist.add_trace(go.Histogram(x=sim_rt_avg, nbinsx=80, marker_color='rgba(100,160,255,0.6)'))
+    fig_hist.add_vline(x=da_avg, line_color='#FFD54F', line_dash='dash')
+    fig_hist.add_vline(x=p50, line_color='#4CAF50', line_dash='dot')
+    fig_hist.add_annotation(x=da_avg, y=1, yref='paper', yshift=10,
+        text=f'DA ${da_avg:,.2f}', showarrow=False,
+        font=dict(color='#FFD54F', size=12), xanchor='left', xshift=8)
+    fig_hist.add_annotation(x=p50, y=1, yref='paper', yshift=-12,
+        text=f'Median ${p50:,.2f}', showarrow=False,
+        font=dict(color='#4CAF50', size=12), xanchor='right', xshift=-8)
+    fig_hist.update_layout(title='Simulated Final RT On-Peak Avg (10,000 paths)',
+        xaxis_title='RT On-Peak Avg ($/MWh)', yaxis_title='Count',
+        template='plotly_dark', height=300, margin=dict(l=40,r=20,t=40,b=40), showlegend=False)
+    st.plotly_chart(fig_hist, use_container_width=True)
+    st.caption(f"Based on {hist['date'].nunique()} historical days, seasonally weighted. "
+               f"10,000 Monte Carlo simulations.")
+
+
+def render_balday_tab(now_ct=None):
+    if now_ct is None:
+        now_ct = datetime.now(CPT_BD)
+
+    # Refresh 1 min after each 15-min mark (:01, :16, :31, :46)
+    # Only refreshes when the Bal-Day tab is the active/visible tab
+    current_min = now_ct.minute
+    current_sec = now_ct.second
+    mins_into_quarter = current_min % 15
+    secs_into_quarter = mins_into_quarter * 60 + current_sec
+    target_secs = 1 * 60  # 1 min past the quarter hour
+    if secs_into_quarter < target_secs:
+        bd_refresh_secs = target_secs - secs_into_quarter
+    else:
+        bd_refresh_secs = (15 * 60) - secs_into_quarter + target_secs
+
+    st.markdown(f"""<script>
+    (function() {{
+        var refreshMs = {bd_refresh_secs * 1000};
+        setTimeout(function checkAndRefresh() {{
+            // Find the active tab button
+            var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+            var activeTab = null;
+            tabs.forEach(function(t) {{
+                if (t.getAttribute('aria-selected') === 'true') activeTab = t.textContent.trim();
+            }});
+            if (activeTab === 'Bal-Day Calc') {{
+                window.parent.location.reload();
+            }} else {{
+                // Not on bal-day tab, check again in 5 min
+                setTimeout(checkAndRefresh, 300000);
+            }}
+        }}, refreshMs);
+    }})();
+    </script>""", unsafe_allow_html=True)
+
+    st.header("Bal-Day Calculator")
+    next_refresh = now_ct + timedelta(seconds=bd_refresh_secs)
+    st.caption(f"Next refresh: {next_refresh.strftime('%I:%M:%S %p CT')} | "
+               f"Last updated: {now_ct.strftime('%I:%M:%S %p CT')}")
+    col_iso, col_pos, _ = st.columns([2, 2, 3])
+    with col_iso:
+        iso_choice = st.selectbox("Market", ["ERCOT", "PJM"], key="balday_iso")
+    with col_pos:
+        position = st.selectbox("Position", ["Long", "Short"], key="balday_pos")
+    is_long = position == "Long"
+    onpk_start, onpk_end = ERCOT_ONPEAK if iso_choice == "ERCOT" else PJM_ONPEAK
+    onpk_hours = onpk_end - onpk_start + 1
+    if iso_choice == "ERCOT":
+        today_str = now_ct.strftime('%Y-%m-%d')
+        current_he = now_ct.hour + 1
+    else:
+        now_ept = datetime.now(EPT_BD)
+        today_str = now_ept.strftime('%Y-%m-%d')
+        current_he = now_ept.hour + 1
+    with st.spinner(f"Fetching {iso_choice} DA & RT..."):
+        da_df = _bd_fetch_today_da(iso_choice, today_str)
+        rt_df = _bd_fetch_today_rt(iso_choice, today_str)
+    if da_df.empty:
+        st.warning(f"{iso_choice} DA prices not available yet for today.")
+        return
+    da_onpk  = da_df[(da_df['HE'] >= onpk_start) & (da_df['HE'] <= onpk_end)]
+    da_by_he = da_onpk.groupby('HE')['DA Price'].mean().reset_index()
+    da_avg   = da_by_he['DA Price'].mean()
+    rt_by_he = pd.DataFrame()
+    if not rt_df.empty:
+        rt_onpk = rt_df[(rt_df['HE'] >= onpk_start) & (rt_df['HE'] <= onpk_end)]
+        if not rt_onpk.empty:
+            rt_by_he = rt_onpk.groupby('HE')['RT Price'].mean().reset_index()
+    hours = pd.DataFrame({'HE': range(onpk_start, onpk_end + 1)})
+    hours['Hour Ending'] = hours['HE'].apply(lambda x: f'HE{x:02}')
+    hours = hours.merge(da_by_he, on='HE', how='left')
+    if not rt_by_he.empty:
+        hours = hours.merge(rt_by_he, on='HE', how='left')
+    else:
+        hours['RT Price'] = pd.Series(dtype=float)
+    hours['Printed'] = hours['RT Price'].notna() & (hours['HE'] <= current_he)
+    printed = hours[hours['Printed']].copy()
+    n_printed   = len(printed)
+    n_remaining = onpk_hours - n_printed
+    rt_printed_sum = printed['RT Price'].sum() if n_printed > 0 else 0.0
+    rt_printed_avg = rt_printed_sum / n_printed if n_printed > 0 else np.nan
+    dart           = da_avg - rt_printed_avg if n_printed > 0 else np.nan
+    breakeven      = (da_avg * onpk_hours - rt_printed_sum) / n_remaining if n_remaining > 0 else np.nan
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("DA On-Pk Avg", f"${da_avg:,.2f}")
+    if n_printed > 0:
+        dart_color = "#4CAF50" if dart >= 0 else "#FF5252"
+        k2.markdown(
+            f'<div style="font-size:13px;color:#888;">RT Running Avg</div>'
+            f'<div style="font-size:24px;font-weight:700;">${rt_printed_avg:,.2f}</div>'
+            f'<div style="display:inline-block;padding:2px 8px;border-radius:4px;'
+            f'background:{dart_color};color:#fff;font-size:13px;font-weight:600;">'
+            f'DART {dart:+.2f}</div>',
+            unsafe_allow_html=True)
+    else:
+        k2.metric("RT Running Avg", "--")
+    k3.metric("Hours Printed", f"{n_printed} / {onpk_hours}")
+    k4.metric("Hours Remaining", str(n_remaining))
+    if n_printed > 0 and n_remaining > 0 and not np.isnan(breakeven):
+        if is_long:
+            msg = (f"Remaining hours need to avg <b>${breakeven:,.2f}</b> "
+                   f"for a negative DART")
+        else:
+            msg = (f"Remaining hours need to avg <b>${breakeven:,.2f}</b> "
+                   f"for a positive DART")
+        st.markdown(
+            f'<div style="border:1px solid rgba(130,100,220,0.6);border-radius:8px;'
+            f'background:linear-gradient(135deg, rgba(90,60,180,0.2), rgba(140,100,240,0.1));'
+            f'padding:18px 24px;margin:12px 0;">'
+            f'<span style="color:#e0d4ff;font-size:19px;">{msg}</span></div>',
+            unsafe_allow_html=True)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=hours['Hour Ending'], y=hours['DA Price'],
+        name='DA Price', marker_color='rgba(130,100,220,0.5)', offsetgroup=0))
+    if n_printed > 0:
+        rt_plot = hours.copy()
+        rt_plot.loc[~rt_plot['Printed'], 'RT Price'] = None
+        fig.add_trace(go.Bar(x=rt_plot['Hour Ending'], y=rt_plot['RT Price'],
+            name='RT Price (Printed)', marker_color='rgba(64,196,255,0.85)', offsetgroup=1))
+    fig.add_hline(y=da_avg, line_color='#FFD54F', line_dash='dash')
+    fig.add_annotation(x=0, y=da_avg, xref='paper', yshift=12,
+        text=f'DA Avg ${da_avg:,.2f}', showarrow=False,
+        font=dict(color='#FFD54F', size=12), xanchor='left')
+    if not np.isnan(breakeven) and n_remaining > 0:
+        fig.add_hline(y=breakeven, line_color='#FF5252', line_dash='dash')
+        fig.add_annotation(x=1, y=breakeven, xref='paper', yshift=-12,
+            text=f'Breakeven ${breakeven:,.2f}', showarrow=False,
+            font=dict(color='#FF5252', size=12), xanchor='right')
+    onpk_labels = [f'HE{h:02}' for h in range(onpk_start, onpk_end + 1)]
+    fig.update_layout(barmode='group', template='plotly_dark', height=360,
+        margin=dict(l=40,r=20,t=40,b=40), legend=dict(orientation='h', yanchor='bottom', y=1.02),
+        xaxis=dict(title='Hour Ending', tickvals=onpk_labels, tickangle=0,
+                   categoryorder='array', categoryarray=onpk_labels),
+        yaxis_title='$/MWh', hovermode='x unified')
+    fig.update_traces(hovertemplate='%{x}: $%{y:,.2f}<extra>%{fullData.name}</extra>')
+    st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Hour-by-Hour Detail", expanded=False):
+        tbl = hours[['Hour Ending', 'DA Price', 'RT Price']].copy()
+        tbl['DART'] = tbl['DA Price'] - tbl['RT Price']
+        tbl['Status'] = hours['Printed'].map({True: 'Printed', False: 'Pending'})
+        tbl['DA Price'] = tbl['DA Price'].apply(lambda x: f'${x:,.2f}' if pd.notna(x) else '--')
+        tbl['RT Price'] = tbl['RT Price'].apply(lambda x: f'${x:,.2f}' if pd.notna(x) else '--')
+        tbl['DART'] = tbl['DART'].apply(lambda x: f'{x:+.2f}' if pd.notna(x) else '--')
+        st.dataframe(tbl, use_container_width=True, hide_index=True)
+    if n_printed > 0 and n_remaining > 0:
+        st.markdown("#### RT Settle Probability")
+        printed_with_da = printed.copy()
+        printed_with_da['DART'] = printed_with_da['DA Price'] - printed_with_da['RT Price']
+        _bd_render_probability(iso_choice, da_avg, rt_printed_sum, rt_printed_avg,
+            n_printed, n_remaining, onpk_hours, onpk_start, onpk_end,
+            current_he, is_long, hours, now_ct, printed_with_da)
+    if n_printed > 0 and n_remaining > 0:
+        st.markdown("#### Target Calculator")
+        default_rt = round(da_avg, 2)
+        target_input = st.text_input(
+            "Target RT On-Pk Final Avg ($/MWh)", value=str(default_rt),
+            key="target_rt_input")
+        try:
+            target_rt_final = float(target_input)
+        except ValueError:
+            target_rt_final = default_rt
+        remaining_sum_needed = target_rt_final * onpk_hours - rt_printed_sum
+        remaining_avg_needed = remaining_sum_needed / n_remaining
+        implied_dart = da_avg - target_rt_final
+        col_t1, col_t2, col_t3 = st.columns(3)
+        col_t1.markdown(
+            f'<div style="text-align:center;padding:10px;">'
+            f'<div style="color:#888;font-size:12px;margin-bottom:4px;">Remaining Hrs Need to Avg</div>'
+            f'<div style="color:#fff;font-size:28px;font-weight:700;">${remaining_avg_needed:,.2f}</div>'
+            f'<div style="color:#aaa;font-size:12px;">{n_remaining} hours left</div></div>',
+            unsafe_allow_html=True)
+        dart_color = "#4CAF50" if implied_dart >= 0 else "#FF5252"
+        col_t2.markdown(
+            f'<div style="text-align:center;padding:10px;">'
+            f'<div style="color:#888;font-size:12px;margin-bottom:4px;">Implied Final DART</div>'
+            f'<div style="color:{dart_color};font-size:28px;font-weight:700;">${implied_dart:+.2f}</div>'
+            f'<div style="color:#aaa;font-size:12px;">DA Avg: ${da_avg:,.2f}</div></div>',
+            unsafe_allow_html=True)
+        current_rt_trajectory = rt_printed_avg if not np.isnan(rt_printed_avg) else 0.0
+        diff_from_current = target_rt_final - current_rt_trajectory
+        diff_color = "#4CAF50" if abs(diff_from_current) < 2 else ("#FFD54F" if abs(diff_from_current) < 5 else "#FF5252")
+        col_t3.markdown(
+            f'<div style="text-align:center;padding:10px;">'
+            f'<div style="color:#888;font-size:12px;margin-bottom:4px;">vs Current RT Avg</div>'
+            f'<div style="color:{diff_color};font-size:28px;font-weight:700;">${diff_from_current:+.2f}</div>'
+            f'<div style="color:#aaa;font-size:12px;">RT Running: ${current_rt_trajectory:,.2f}</div></div>',
+            unsafe_allow_html=True)
+
+
+# ==============================================================================
+
+
 def main():
     check_password()
     st.title("Fundies")
     try:
-        tab1, tab2, tab5, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Gas", "News"])
+        tab1, tab2, tab5, tab3, tab4, tab6 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Gas", "News", "Bal-Day Calc"])
         with st.spinner("Loading forecast data..."):
             cache_time = get_cache_time()
             result = fetch_forecast_data(cache_time)
@@ -3012,6 +3601,9 @@ def main():
                     )
                     st.plotly_chart(fig_6d, use_container_width=True)
 
+
+        with tab6:
+            render_balday_tab()
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
