@@ -1386,30 +1386,41 @@ EPT_BD = ZoneInfo("America/New_York")
 ERCOT_ONPEAK = (7, 22)
 PJM_ONPEAK   = (8, 23)
 
-# Repo path (committed parquet files, read-only on Streamlit Cloud)
-# Try multiple paths since Streamlit Cloud working dir can vary
-_REPO_DIR_CANDIDATES = [
-    Path(os.path.dirname(os.path.abspath(__file__))) / "balday_cache",
-    Path.cwd() / "balday_cache",
-    Path("/mount/src") / "lre-fundies" / "balday_cache",  # Streamlit Cloud default
-    Path("/app") / "balday_cache",
-]
-_REPO_DIR = None
-for _candidate in _REPO_DIR_CANDIDATES:
-    if _candidate.exists():
-        _REPO_DIR = _candidate
-        break
-if _REPO_DIR is None:
-    _REPO_DIR = _REPO_DIR_CANDIDATES[0]  # fallback
-
-# Writable path (for appending new days during a session)
+# Find repo parquets - try every possible Streamlit Cloud mount point
 _WORK_DIR = Path("/tmp/balday_cache")
 _WORK_DIR.mkdir(parents=True, exist_ok=True)
-
-ERCOT_PARQUET_REPO = _REPO_DIR / "ercot_dart.parquet"
-PJM_PARQUET_REPO   = _REPO_DIR / "pjm_dart.parquet"
 ERCOT_PARQUET = _WORK_DIR / "ercot_dart.parquet"
 PJM_PARQUET   = _WORK_DIR / "pjm_dart.parquet"
+
+def _find_repo_parquet(filename):
+    """Search for a parquet file in all possible repo locations."""
+    candidates = [
+        Path(os.path.dirname(os.path.abspath(__file__))) / "balday_cache" / filename,
+        Path.cwd() / "balday_cache" / filename,
+        Path("/mount/src/lre-fundies/balday_cache") / filename,
+        Path("/mount/src/LRE-Fundies/balday_cache") / filename,
+        Path("/app/balday_cache") / filename,
+        Path("/app/lre-fundies/balday_cache") / filename,
+        Path("/home/appuser/balday_cache") / filename,
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    # Also try glob as last resort
+    for parent in [Path("/mount/src"), Path("/app"), Path("/home/appuser")]:
+        if parent.exists():
+            matches = list(parent.rglob(f"balday_cache/{filename}"))
+            if matches:
+                return matches[0]
+    return None
+
+# Seed on module load - copy repo parquets to /tmp once
+import shutil
+for _fname, _dst in [("ercot_dart.parquet", ERCOT_PARQUET), ("pjm_dart.parquet", PJM_PARQUET)]:
+    if not _dst.exists():
+        _src = _find_repo_parquet(_fname)
+        if _src:
+            shutil.copy2(_src, _dst)
 
 BALDAY_KEEP_DAYS = 400
 BALDAY_CHUNK     = 7
@@ -1473,8 +1484,8 @@ def _bd_gist_upload(df, filename):
 def _bd_seed_parquet(iso):
     """Cold start: try gist first (freshest), then repo parquet as fallback."""
     work_path = ERCOT_PARQUET if iso == "ERCOT" else PJM_PARQUET
-    repo_path = ERCOT_PARQUET_REPO if iso == "ERCOT" else PJM_PARQUET_REPO
     gist_file = _GIST_ERCOT_FILE if iso == "ERCOT" else _GIST_PJM_FILE
+    fname = "ercot_dart.parquet" if iso == "ERCOT" else "pjm_dart.parquet"
 
     if work_path.exists():
         return  # Already seeded this session
@@ -1485,10 +1496,11 @@ def _bd_seed_parquet(iso):
         gist_df.to_parquet(work_path, index=False, engine='pyarrow', compression='snappy')
         return
 
-    # Fall back to repo
+    # Fall back to repo search
     import shutil
-    if repo_path.exists():
-        shutil.copy2(repo_path, work_path)
+    src = _find_repo_parquet(fname)
+    if src:
+        shutil.copy2(src, work_path)
 
 
 def _yes_fetch(url, max_retries=3):
@@ -1861,7 +1873,20 @@ def render_balday_tab(now_ct=None):
             node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
             rt_df = _yes_rtlmp(node, today_str)
     if da_df is None or da_df.empty:
+        # Show diagnostic info
+        node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
+        test_url = f"{YES_BASE}/timeseries/DALMP/{node}?agglevel=HOUR&startdate={today_str}&enddate={today_str}"
         st.warning(f"{iso_choice} DA prices not available yet for today.")
+        st.caption(f"Node: {node} | Date: {today_str} | URL: {test_url}")
+        # Try raw fetch and show what we get
+        try:
+            r = requests.get(test_url, auth=YES_AUTH, timeout=30)
+            st.caption(f"HTTP {r.status_code} | Response length: {len(r.text)} chars")
+            if r.status_code == 200 and len(r.text) > 100:
+                test_df = pd.read_html(StringIO(r.text))[0]
+                st.caption(f"Parsed columns: {list(test_df.columns)} | Rows: {len(test_df)}")
+        except Exception as e:
+            st.caption(f"Raw fetch error: {e}")
         return
     da_onpk  = da_df[(da_df['HE'] >= onpk_start) & (da_df['HE'] <= onpk_end)]
     da_by_he = da_onpk.groupby('HE')['DA Price'].mean().reset_index()
