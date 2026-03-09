@@ -1387,7 +1387,21 @@ ERCOT_ONPEAK = (7, 22)
 PJM_ONPEAK   = (8, 23)
 
 # Repo path (committed parquet files, read-only on Streamlit Cloud)
-_REPO_DIR = Path(os.path.dirname(os.path.abspath(__file__))) / "balday_cache"
+# Try multiple paths since Streamlit Cloud working dir can vary
+_REPO_DIR_CANDIDATES = [
+    Path(os.path.dirname(os.path.abspath(__file__))) / "balday_cache",
+    Path.cwd() / "balday_cache",
+    Path("/mount/src") / "lre-fundies" / "balday_cache",  # Streamlit Cloud default
+    Path("/app") / "balday_cache",
+]
+_REPO_DIR = None
+for _candidate in _REPO_DIR_CANDIDATES:
+    if _candidate.exists():
+        _REPO_DIR = _candidate
+        break
+if _REPO_DIR is None:
+    _REPO_DIR = _REPO_DIR_CANDIDATES[0]  # fallback
+
 # Writable path (for appending new days during a session)
 _WORK_DIR = Path("/tmp/balday_cache")
 _WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -1494,8 +1508,7 @@ def _yes_fetch(url, max_retries=3):
 
 
 def _yes_dalmp(node, date_str):
-    encoded_node = quote(node)
-    url = (f"{YES_BASE}/timeseries/DALMP/{encoded_node}"
+    url = (f"{YES_BASE}/timeseries/DALMP/{node}"
            f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
     df = _yes_fetch(url)
     if df is None or df.empty:
@@ -1508,8 +1521,7 @@ def _yes_dalmp(node, date_str):
 
 
 def _yes_rtlmp(node, date_str):
-    encoded_node = quote(node)
-    url = (f"{YES_BASE}/timeseries/RTLMP/{encoded_node}"
+    url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
            f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
     df = _yes_fetch(url)
     if df is None or df.empty:
@@ -1522,10 +1534,9 @@ def _yes_rtlmp(node, date_str):
 
 
 def _yes_hist_dart(node, start_date, end_date):
-    encoded_node = quote(node)
-    da_url = (f"{YES_BASE}/timeseries/DALMP/{encoded_node}"
+    da_url = (f"{YES_BASE}/timeseries/DALMP/{node}"
               f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
-    rt_url = (f"{YES_BASE}/timeseries/RTLMP/{encoded_node}"
+    rt_url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
               f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
     da_df = _yes_fetch(da_url)
     rt_df = _yes_fetch(rt_url)
@@ -1631,6 +1642,12 @@ def _bd_backfill_parquet(iso, parquet_path):
     missing = _bd_missing_dates(existing, yesterday)
     if not missing:
         return existing
+
+    # Safety cap: if more than 14 days missing, seed failed -- only fetch last 14
+    if len(missing) > 14:
+        cutoff = (yesterday - timedelta(days=13)).strftime('%Y-%m-%d')
+        missing = [d for d in missing if d >= cutoff]
+
     chunks = _bd_chunk_dates(missing, BALDAY_CHUNK)
     node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
     new_frames = []
