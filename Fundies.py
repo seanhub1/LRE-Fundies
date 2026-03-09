@@ -1418,7 +1418,7 @@ BALDAY_SLEEP     = 1.5
 YES_AUTH = ('Leeward_YesAPI1', 'LresYsEnergy202%!')
 YES_BASE = 'https://services.yesenergy.com/PS/rest'
 YES_ERCOT_NODE = 'HB_NORTH'
-YES_PJM_NODE   = 'WESTERN%20HUB'
+YES_PJM_NODE   = 'WESTERN HUB'
 
 # Gist filenames for balday parquet persistence
 _GIST_ERCOT_FILE = "balday_ercot_dart.b64"
@@ -1565,9 +1565,8 @@ def _bd_fetch_today_da(iso, today_str):
     node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
     df = _yes_dalmp(node, today_str)
     if df.empty:
-        # Don't cache empty results -- clear this entry so next load retries
-        _bd_fetch_today_da.clear()
-        return pd.DataFrame(columns=['HE', 'DA Price'])
+        # Return None so we can detect and retry outside the cache
+        return None
     return df
 
 
@@ -1576,8 +1575,7 @@ def _bd_fetch_today_rt(iso, today_str):
     node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
     df = _yes_rtlmp(node, today_str)
     if df.empty:
-        _bd_fetch_today_rt.clear()
-        return pd.DataFrame(columns=['HE', 'RT Price'])
+        return None
     return df
 
 
@@ -1855,14 +1853,21 @@ def render_balday_tab(now_ct=None):
     with st.spinner(f"Fetching {iso_choice} DA & RT..."):
         da_df = _bd_fetch_today_da(iso_choice, today_str)
         rt_df = _bd_fetch_today_rt(iso_choice, today_str)
-    if da_df.empty:
+        # If cached result was None (empty), retry directly bypassing cache
+        if da_df is None:
+            node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
+            da_df = _yes_dalmp(node, today_str)
+        if rt_df is None:
+            node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
+            rt_df = _yes_rtlmp(node, today_str)
+    if da_df is None or da_df.empty:
         st.warning(f"{iso_choice} DA prices not available yet for today.")
         return
     da_onpk  = da_df[(da_df['HE'] >= onpk_start) & (da_df['HE'] <= onpk_end)]
     da_by_he = da_onpk.groupby('HE')['DA Price'].mean().reset_index()
     da_avg   = da_by_he['DA Price'].mean()
     rt_by_he = pd.DataFrame()
-    if not rt_df.empty:
+    if rt_df is not None and not rt_df.empty:
         rt_onpk = rt_df[(rt_df['HE'] >= onpk_start) & (rt_df['HE'] <= onpk_end)]
         if not rt_onpk.empty:
             rt_by_he = rt_onpk.groupby('HE')['RT Price'].mean().reset_index()
