@@ -7,3 +7,4 @@ yfinance
 mplfinance
 matplotlib
 gridstatus
+pyarrow
