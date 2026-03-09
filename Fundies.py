@@ -1582,8 +1582,8 @@ def _bd_fetch_today_da(iso, today_str):
     return df
 
 
-@st.cache_data(ttl=960)
 def _bd_fetch_today_rt(iso, today_str):
+    """Fetch RT prices from YES Energy (called only on Refresh button click)."""
     node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
     df = _yes_rtlmp(node, today_str)
     if df.empty:
@@ -1811,42 +1811,7 @@ def render_balday_tab(now_ct=None):
     if now_ct is None:
         now_ct = datetime.now(CPT_BD)
 
-    # Refresh 1 min after each 15-min mark (:01, :16, :31, :46)
-    # Only refreshes when the Bal-Day tab is the active/visible tab
-    current_min = now_ct.minute
-    current_sec = now_ct.second
-    mins_into_quarter = current_min % 15
-    secs_into_quarter = mins_into_quarter * 60 + current_sec
-    target_secs = 1 * 60  # 1 min past the quarter hour
-    if secs_into_quarter < target_secs:
-        bd_refresh_secs = target_secs - secs_into_quarter
-    else:
-        bd_refresh_secs = (15 * 60) - secs_into_quarter + target_secs
-
-    st.markdown(f"""<script>
-    (function() {{
-        var refreshMs = {bd_refresh_secs * 1000};
-        setTimeout(function checkAndRefresh() {{
-            // Find the active tab button
-            var tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-            var activeTab = null;
-            tabs.forEach(function(t) {{
-                if (t.getAttribute('aria-selected') === 'true') activeTab = t.textContent.trim();
-            }});
-            if (activeTab === 'Bal-Day Calc') {{
-                window.parent.location.reload();
-            }} else {{
-                // Not on bal-day tab, check again in 5 min
-                setTimeout(checkAndRefresh, 300000);
-            }}
-        }}, refreshMs);
-    }})();
-    </script>""", unsafe_allow_html=True)
-
     st.header("Bal-Day Calculator")
-    next_refresh = now_ct + timedelta(seconds=bd_refresh_secs)
-    st.caption(f"Next refresh: {next_refresh.strftime('%I:%M:%S %p CT')} | "
-               f"Last updated: {now_ct.strftime('%I:%M:%S %p CT')}")
     col_iso, col_pos, _ = st.columns([2, 2, 3])
     with col_iso:
         iso_choice = st.selectbox("Market", ["ERCOT", "PJM"], key="balday_iso")
@@ -1862,16 +1827,39 @@ def render_balday_tab(now_ct=None):
         now_ept = datetime.now(EPT_BD)
         today_str = now_ept.strftime('%Y-%m-%d')
         current_he = now_ept.hour + 1
-    with st.spinner(f"Fetching {iso_choice} DA & RT..."):
-        da_df = _bd_fetch_today_da(iso_choice, today_str)
-        rt_df = _bd_fetch_today_rt(iso_choice, today_str)
-        # If cached result was None (empty), retry directly bypassing cache
-        if da_df is None:
-            node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
-            da_df = _yes_dalmp(node, today_str)
-        if rt_df is None:
-            node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
-            rt_df = _yes_rtlmp(node, today_str)
+
+    # Session state keys for accumulated RT data
+    rt_key = f"balday_rt_{iso_choice}_{today_str}"
+    rt_ts_key = f"balday_rt_ts_{iso_choice}_{today_str}"
+
+    # Refresh button — fetches only NEW RT hours, merges into session state
+    col_refresh, col_ts, _ = st.columns([2, 4, 6])
+    with col_refresh:
+        if st.button("Refresh Prices", key="balday_refresh", type="primary", use_container_width=True):
+            fresh_rt = _bd_fetch_today_rt(iso_choice, today_str)
+            if fresh_rt is not None and not fresh_rt.empty:
+                existing = st.session_state.get(rt_key)
+                if existing is not None and not existing.empty:
+                    # Only keep new hours not already stored
+                    have_hes = set(existing['HE'].tolist())
+                    new_rows = fresh_rt[~fresh_rt['HE'].isin(have_hes)]
+                    if not new_rows.empty:
+                        st.session_state[rt_key] = pd.concat([existing, new_rows], ignore_index=True).sort_values('HE')
+                else:
+                    st.session_state[rt_key] = fresh_rt.sort_values('HE')
+                st.session_state[rt_ts_key] = now_ct.strftime('%I:%M:%S %p CT')
+    with col_ts:
+        last_rt_update = st.session_state.get(rt_ts_key, "Not yet refreshed")
+        st.caption(f"RT last updated: {last_rt_update}")
+
+    # DA: cached for the day (single API call per day)
+    da_df = _bd_fetch_today_da(iso_choice, today_str)
+    if da_df is None:
+        node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
+        da_df = _yes_dalmp(node, today_str)
+    # RT: read from session state (no API call unless button pressed)
+    rt_df = st.session_state.get(rt_key)
+
     if da_df is None or da_df.empty:
         # Show diagnostic info
         node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
