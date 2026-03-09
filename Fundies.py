@@ -1418,7 +1418,7 @@ BALDAY_SLEEP     = 1.5
 YES_AUTH = ('Leeward_YesAPI1', 'LresYsEnergy202%!')
 YES_BASE = 'https://services.yesenergy.com/PS/rest'
 YES_ERCOT_NODE = 'HB_NORTH'
-YES_PJM_NODE   = 'WESTERN HUB'
+YES_PJM_NODE   = 'WESTERN%20HUB'
 
 # Gist filenames for balday parquet persistence
 _GIST_ERCOT_FILE = "balday_ercot_dart.b64"
@@ -1994,7 +1994,7 @@ def main():
     check_password()
     st.title("Fundies")
     try:
-        tab1, tab2, tab5, tab3, tab4, tab6 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Gas", "News", "Bal-Day Calc"])
+        tab1, tab2, tab5, tab6, tab3, tab4 = st.tabs(["ERCOT Weekly", "PJM Weekly", "ERCOT Reserves", "Bal-Day Calc", "Gas", "News"])
         with st.spinner("Loading forecast data..."):
             cache_time = get_cache_time()
             result = fetch_forecast_data(cache_time)
