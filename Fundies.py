@@ -1574,37 +1574,33 @@ def _yes_hist_dart(node, start_date, end_date):
 
 @st.cache_data(ttl=86400)
 def _bd_fetch_today_da(iso, today_str):
-    node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
-    df = _yes_dalmp(node, today_str)
-    if df.empty:
-        # Return None so we can detect and retry outside the cache
-        return None
+    """Fetch DA prices from native ISO APIs. Cached for the day.
+    ERCOT: np4-190-cd DAM SPP for HB_NORTH.
+    PJM: da_hrl_lmps for Western Hub (pnode_id=51288).
+    Raises ValueError if not available yet so st.cache_data won't cache failure.
+    """
+    if iso == "ERCOT":
+        df = _ercot_da_spp(today_str)
+    else:
+        df = _pjm_da_hourly(today_str)
+    if df is None or df.empty:
+        raise ValueError("DA not available yet")
     return df
 
 
-def _bd_fetch_today_rt(iso, today_str):
-    """Fetch RT prices from native ISO APIs (called only on Refresh button click).
-    ERCOT: np6-905-cd SPP 15-min data for HB_NORTH, averaged to hourly.
-    PJM: rt_fivemin_hrl_lmps 5-min data for Western Hub (pnode 51217), averaged to hourly.
-    """
-    if iso == "ERCOT":
-        return _ercot_rt_spp(today_str)
-    else:
-        return _pjm_rt_5min(today_str)
-
-
-def _ercot_rt_spp(today_str):
-    """Fetch ERCOT 15-min RT SPP for HB_NORTH, average to hourly."""
+def _ercot_da_spp(today_str):
+    """Fetch ERCOT DAM SPP for HB_NORTH (np4-190-cd), returns [HE, DA Price]."""
     auths = ercot_token()
     if not auths:
         return None
     url = (
-        f"https://api.ercot.com/api/public-reports/np6-905-cd/spp_node_zone_hub"
+        f"https://api.ercot.com/api/public-reports/np4-190-cd/dam_stlmnt_pnt_prices"
         f"?deliveryDateFrom={today_str}&deliveryDateTo={today_str}"
         f"&settlementPoint=HB_NORTH"
     )
     try:
         all_data = []
+        fields = []
         page = 1
         while True:
             page_url = f"{url}&page={page}&size=1000"
@@ -1615,7 +1611,8 @@ def _ercot_rt_spp(today_str):
             rows = result.get("data", [])
             if not rows:
                 break
-            fields = [f['name'] for f in result.get("fields", [])]
+            if not fields:
+                fields = [f['name'] for f in result.get("fields", [])]
             all_data.extend(rows)
             meta = result.get("_meta", {})
             if page >= meta.get("totalPages", 1):
@@ -1624,12 +1621,139 @@ def _ercot_rt_spp(today_str):
         if not all_data:
             return None
         df = pd.DataFrame(all_data, columns=fields if fields else None)
-        if 'settlementPointPrice' not in df.columns:
+        # Find price column
+        price_col = None
+        for col in ['settlementPointPrice', 'SPP', 'DASpp', 'DAPrice']:
+            if col in df.columns:
+                price_col = col
+                break
+        if price_col is None:
+            for col in df.columns:
+                if 'price' in col.lower() or 'spp' in col.lower():
+                    price_col = col
+                    break
+        if price_col is None:
             return None
-        df['deliveryHour'] = pd.to_numeric(df['deliveryHour'], errors='coerce').astype(int)
-        df['settlementPointPrice'] = pd.to_numeric(df['settlementPointPrice'], errors='coerce')
-        # Average all 15-min intervals within each hour
-        hourly = df.groupby('deliveryHour')['settlementPointPrice'].mean().reset_index()
+        # Find hour column
+        hour_col = None
+        for col in ['deliveryHour', 'hourEnding']:
+            if col in df.columns:
+                hour_col = col
+                break
+        if hour_col is None:
+            return None
+        df[hour_col] = pd.to_numeric(df[hour_col], errors='coerce').astype(int)
+        df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
+        hourly = df.groupby(hour_col)[price_col].mean().reset_index()
+        hourly.columns = ['HE', 'DA Price']
+        return hourly.sort_values('HE').reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def _pjm_da_hourly(today_str):
+    """Fetch PJM DA hourly LMP for Western Hub (pnode_id=51288), returns [HE, DA Price]."""
+    pjm_headers = {
+        'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
+    }
+    url = (
+        f"https://api.pjm.com/api/v1/da_hrl_lmps"
+        f"?download=true&rowCount=50000"
+        f"&sort=datetime_beginning_ept&order=Asc&startRow=1"
+        f"&datetime_beginning_ept={today_str}%2000:00to{today_str}%2023:59"
+        f"&pnode_id=51288"
+        f"&fields=datetime_beginning_ept,total_lmp_da,pnode_id"
+    )
+    try:
+        resp = requests.get(url, headers=pjm_headers, timeout=120)
+        if not resp.ok:
+            return None
+        data = resp.json()
+        if not data:
+            return None
+        df = pd.json_normalize(data)
+        if df.empty or 'total_lmp_da' not in df.columns:
+            return None
+        df['datetime_beginning_ept'] = pd.to_datetime(df['datetime_beginning_ept'])
+        df['HE'] = df['datetime_beginning_ept'].dt.hour + 1
+        df['total_lmp_da'] = pd.to_numeric(df['total_lmp_da'], errors='coerce')
+        hourly = df.groupby('HE')['total_lmp_da'].mean().reset_index()
+        hourly.columns = ['HE', 'DA Price']
+        return hourly.sort_values('HE').reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def _bd_fetch_today_rt(iso, today_str):
+    """Fetch RT prices from native ISO APIs (called only on Refresh button click).
+    ERCOT: np6-788-cd SCED LMP 5-min data for HB_NORTH, averaged to hourly.
+    PJM: rt_unverified_fivemin_lmps 5-min data for Western Hub (pnode 51288), averaged to hourly.
+    Both use the fastest/unverified feeds for latest intraday prices.
+    """
+    if iso == "ERCOT":
+        return _ercot_rt_spp(today_str)
+    else:
+        return _pjm_rt_5min(today_str)
+
+
+def _ercot_rt_spp(today_str):
+    """Fetch ERCOT 5-min SCED LMPs for HB_NORTH (np6-788-cd), average to hourly.
+    Uses SCEDTimestampFrom/To. Price column = LMP. Hour derived from SCEDTimestamp.
+    """
+    auths = ercot_token()
+    if not auths:
+        return None
+    url = (
+        f"https://api.ercot.com/api/public-reports/np6-788-cd/lmp_node_zone_hub"
+        f"?SCEDTimestampFrom={today_str}T00:00:00&SCEDTimestampTo={today_str}T23:59:59"
+        f"&settlementPoint=HB_NORTH"
+    )
+    try:
+        all_data = []
+        fields = []
+        page = 1
+        while True:
+            page_url = f"{url}&page={page}&size=1000"
+            resp = requests.get(page_url, headers=auths, timeout=60)
+            if not resp.ok:
+                break
+            result = resp.json()
+            rows = result.get("data", [])
+            if not rows:
+                break
+            if not fields:
+                fields = [f['name'] for f in result.get("fields", [])]
+            all_data.extend(rows)
+            meta = result.get("_meta", {})
+            if page >= meta.get("totalPages", 1):
+                break
+            page += 1
+        if not all_data:
+            return None
+        df = pd.DataFrame(all_data, columns=fields if fields else None)
+        # Price column is 'LMP' (confirmed from test)
+        price_col = None
+        for col in ['LMP', 'LMPValue', 'lmpValue', 'settlementPointPrice']:
+            if col in df.columns:
+                price_col = col
+                break
+        if price_col is None:
+            for col in df.columns:
+                if 'price' in col.lower() or 'lmp' in col.lower():
+                    price_col = col
+                    break
+        if price_col is None:
+            return None
+        df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
+        # Derive hour from SCEDTimestamp (confirmed from test)
+        if 'SCEDTimestamp' in df.columns:
+            df['_ts'] = pd.to_datetime(df['SCEDTimestamp'])
+            df['HE'] = df['_ts'].dt.hour + 1
+        elif 'deliveryHour' in df.columns:
+            df['HE'] = pd.to_numeric(df['deliveryHour'], errors='coerce').astype(int)
+        else:
+            return None
+        hourly = df.groupby('HE')[price_col].mean().reset_index()
         hourly.columns = ['HE', 'RT Price']
         return hourly.sort_values('HE').reset_index(drop=True)
     except Exception:
@@ -1637,17 +1761,19 @@ def _ercot_rt_spp(today_str):
 
 
 def _pjm_rt_5min(today_str):
-    """Fetch PJM 5-min RT LMP for Western Hub (pnode 51217), average to hourly."""
+    """Fetch PJM unverified 5-min RT LMP for Western Hub (pnode_id=51288), average to hourly.
+    Uses rt_unverified_fivemin_lmps — posts within minutes, fastest available.
+    """
     pjm_headers = {
         'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
     }
-    # Western Hub pnode_id = 51217
+    date_filter = f"{today_str} 00:00 to {today_str} 23:59"
     url = (
-        f"https://api.pjm.com/api/v1/rt_fivemin_hrl_lmps"
+        f"https://api.pjm.com/api/v1/rt_unverified_fivemin_lmps"
         f"?download=true&rowCount=50000"
         f"&sort=datetime_beginning_ept&order=Asc&startRow=1"
-        f"&datetime_beginning_ept={today_str}%2000:00to{today_str}%2023:59"
-        f"&pnode_id=51217"
+        f"&datetime_beginning_ept={quote(date_filter)}"
+        f"&pnode_id=51288"
         f"&fields=datetime_beginning_ept,total_lmp_rt,pnode_id"
     )
     try:
@@ -1663,7 +1789,6 @@ def _pjm_rt_5min(today_str):
         df['datetime_beginning_ept'] = pd.to_datetime(df['datetime_beginning_ept'])
         df['HE'] = df['datetime_beginning_ept'].dt.hour + 1
         df['total_lmp_rt'] = pd.to_numeric(df['total_lmp_rt'], errors='coerce')
-        # Average all 5-min intervals within each hour
         hourly = df.groupby('HE')['total_lmp_rt'].mean().reset_index()
         hourly.columns = ['HE', 'RT Price']
         return hourly.sort_values('HE').reset_index(drop=True)
@@ -1933,29 +2058,17 @@ def render_balday_tab(now_ct=None):
         last_rt_update = st.session_state.get(rt_ts_key, "Not yet refreshed")
         st.caption(f"RT last updated: {last_rt_update}")
 
-    # DA: cached for the day (single API call per day)
-    da_df = _bd_fetch_today_da(iso_choice, today_str)
-    if da_df is None:
-        node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
-        da_df = _yes_dalmp(node, today_str)
+    # DA: cached for the day (retries each load if not yet available)
+    da_df = None
+    try:
+        da_df = _bd_fetch_today_da(iso_choice, today_str)
+    except ValueError:
+        pass  # DA not available yet
     # RT: read from session state (no API call unless button pressed)
     rt_df = st.session_state.get(rt_key)
 
     if da_df is None or da_df.empty:
-        # Show diagnostic info
-        node = YES_ERCOT_NODE if iso_choice == "ERCOT" else YES_PJM_NODE
-        test_url = f"{YES_BASE}/timeseries/DALMP/{node}?agglevel=HOUR&startdate={today_str}&enddate={today_str}"
-        st.warning(f"{iso_choice} DA prices not available yet for today.")
-        st.caption(f"Node: {node} | Date: {today_str} | URL: {test_url}")
-        # Try raw fetch and show what we get
-        try:
-            r = requests.get(test_url, auth=YES_AUTH, timeout=30)
-            st.caption(f"HTTP {r.status_code} | Response length: {len(r.text)} chars")
-            if r.status_code == 200 and len(r.text) > 100:
-                test_df = pd.read_html(StringIO(r.text))[0]
-                st.caption(f"Parsed columns: {list(test_df.columns)} | Rows: {len(test_df)}")
-        except Exception as e:
-            st.caption(f"Raw fetch error: {e}")
+        st.warning(f"{iso_choice} DA prices not available yet for today ({today_str}).")
         return
     da_onpk  = da_df[(da_df['HE'] >= onpk_start) & (da_df['HE'] <= onpk_end)]
     da_by_he = da_onpk.groupby('HE')['DA Price'].mean().reset_index()
