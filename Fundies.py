@@ -2008,10 +2008,10 @@ def _bd_render_probability(iso_choice, da_avg, rt_printed_sum, rt_printed_avg,
     fig_hist.add_vline(x=p50, line_color='#4CAF50', line_dash='dot')
     fig_hist.add_annotation(x=da_avg, y=1, yref='paper', yshift=10,
         text=f'DA ${da_avg:,.2f}', showarrow=False,
-        font=dict(color='#FFD54F', size=12), xanchor='left', xshift=8)
+        font=dict(color='#FFD54F', size=12), xanchor='center')
     fig_hist.add_annotation(x=p50, y=1, yref='paper', yshift=-12,
         text=f'Median ${p50:,.2f}', showarrow=False,
-        font=dict(color='#4CAF50', size=12), xanchor='right', xshift=-8)
+        font=dict(color='#4CAF50', size=12), xanchor='center')
     fig_hist.update_layout(title='Simulated Final RT On-Peak Avg (10,000 paths)',
         xaxis_title='RT On-Peak Avg ($/MWh)', yaxis_title='Count',
         template='plotly_dark', height=300, margin=dict(l=40,r=20,t=40,b=40), showlegend=False)
