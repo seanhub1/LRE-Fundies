@@ -1642,9 +1642,15 @@ def _ercot_da_spp(today_str):
                 break
         if hour_col is None:
             return None
-        df[hour_col] = pd.to_numeric(df[hour_col], errors='coerce').astype(int)
+        # hourEnding can be '01:00' format or plain int
+        if df[hour_col].dtype == 'object' and df[hour_col].str.contains(':').any():
+            df['HE'] = df[hour_col].str.split(':').str[0].astype(int)
+        else:
+            df['HE'] = pd.to_numeric(df[hour_col], errors='coerce')
         df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
-        hourly = df.groupby(hour_col)[price_col].mean().reset_index()
+        df = df.dropna(subset=['HE', price_col])
+        df['HE'] = df['HE'].astype(int)
+        hourly = df.groupby('HE')[price_col].mean().reset_index()
         hourly.columns = ['HE', 'DA Price']
         return hourly.sort_values('HE').reset_index(drop=True)
     except Exception:
@@ -1747,12 +1753,14 @@ def _ercot_rt_spp(today_str):
         df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
         # Derive hour from SCEDTimestamp (confirmed from test)
         if 'SCEDTimestamp' in df.columns:
-            df['_ts'] = pd.to_datetime(df['SCEDTimestamp'])
+            df['_ts'] = pd.to_datetime(df['SCEDTimestamp'], errors='coerce')
             df['HE'] = df['_ts'].dt.hour + 1
         elif 'deliveryHour' in df.columns:
-            df['HE'] = pd.to_numeric(df['deliveryHour'], errors='coerce').astype(int)
+            df['HE'] = pd.to_numeric(df['deliveryHour'], errors='coerce')
         else:
             return None
+        df = df.dropna(subset=['HE', price_col])
+        df['HE'] = df['HE'].astype(int)
         hourly = df.groupby('HE')[price_col].mean().reset_index()
         hourly.columns = ['HE', 'RT Price']
         return hourly.sort_values('HE').reset_index(drop=True)
