@@ -1426,8 +1426,7 @@ BALDAY_KEEP_DAYS = 400
 BALDAY_CHUNK     = 7
 BALDAY_SLEEP     = 1.5
 
-YES_AUTH = ('Leeward_YesAPI1', 'LresYsEnergy202%!')
-YES_BASE = 'https://services.yesenergy.com/PS/rest'
+
 YES_ERCOT_NODE = 'HB_NORTH'
 YES_PJM_NODE   = 'WESTERN HUB'
 
@@ -1437,7 +1436,7 @@ _GIST_PJM_FILE   = "balday_pjm_dart.b64"
 
 
 def _bd_gist_download(filename):
-    """Download a parquet file from gist (stored as base64). Returns DataFrame or None."""
+    
     import base64
     try:
         gist_id = st.secrets.get("gist", {}).get("id")
@@ -1462,7 +1461,7 @@ def _bd_gist_download(filename):
 
 
 def _bd_gist_upload(df, filename):
-    """Upload a parquet DataFrame to gist as base64."""
+    
     import base64
     try:
         gist_id = st.secrets.get("gist", {}).get("id")
@@ -1482,7 +1481,7 @@ def _bd_gist_upload(df, filename):
 
 
 def _bd_seed_parquet(iso):
-    """Cold start: try gist first (freshest), then repo parquet as fallback."""
+    
     work_path = ERCOT_PARQUET if iso == "ERCOT" else PJM_PARQUET
     gist_file = _GIST_ERCOT_FILE if iso == "ERCOT" else _GIST_PJM_FILE
     fname = "ercot_dart.parquet" if iso == "ERCOT" else "pjm_dart.parquet"
@@ -1490,13 +1489,13 @@ def _bd_seed_parquet(iso):
     if work_path.exists():
         return  # Already seeded this session
 
-    # Try gist first
+    
     gist_df = _bd_gist_download(gist_file)
     if gist_df is not None and not gist_df.empty:
         gist_df.to_parquet(work_path, index=False, engine='pyarrow', compression='snappy')
         return
 
-    # Fall back to repo search
+    
     import shutil
     src = _find_repo_parquet(fname)
     if src:
@@ -1519,30 +1518,7 @@ def _yes_fetch(url, max_retries=3):
     return None
 
 
-def _yes_dalmp(node, date_str):
-    url = (f"{YES_BASE}/timeseries/DALMP/{node}"
-           f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
-    df = _yes_fetch(url)
-    if df is None or df.empty:
-        return pd.DataFrame(columns=['HE', 'DA Price'])
-    df = df[['HOURENDING', 'AVGVALUE']].copy()
-    df.columns = ['HE', 'DA Price']
-    df['HE'] = pd.to_numeric(df['HE'], errors='coerce').astype(int)
-    df['DA Price'] = pd.to_numeric(df['DA Price'], errors='coerce')
-    return df[['HE', 'DA Price']].dropna()
 
-
-def _yes_rtlmp(node, date_str):
-    url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
-           f"?agglevel=HOUR&startdate={date_str}&enddate={date_str}")
-    df = _yes_fetch(url)
-    if df is None or df.empty:
-        return pd.DataFrame(columns=['HE', 'RT Price'])
-    df = df[['HOURENDING', 'AVGVALUE']].copy()
-    df.columns = ['HE', 'RT Price']
-    df['HE'] = pd.to_numeric(df['HE'], errors='coerce').astype(int)
-    df['RT Price'] = pd.to_numeric(df['RT Price'], errors='coerce')
-    return df.groupby('HE')['RT Price'].mean().reset_index()
 
 
 def _yes_hist_dart(node, start_date, end_date):
@@ -1574,11 +1550,7 @@ def _yes_hist_dart(node, start_date, end_date):
 
 @st.cache_data(ttl=86400)
 def _bd_fetch_today_da(iso, today_str):
-    """Fetch DA prices from native ISO APIs. Cached for the day.
-    ERCOT: np4-190-cd DAM SPP for HB_NORTH.
-    PJM: da_hrl_lmps for Western Hub (pnode_id=51288).
-    Raises ValueError if not available yet so st.cache_data won't cache failure.
-    """
+
     if iso == "ERCOT":
         df = _ercot_da_spp(today_str)
     else:
@@ -1589,7 +1561,7 @@ def _bd_fetch_today_da(iso, today_str):
 
 
 def _ercot_da_spp(today_str):
-    """Fetch ERCOT DAM SPP for HB_NORTH (np4-190-cd), returns [HE, DA Price]."""
+
     auths = ercot_token()
     if not auths:
         return None
@@ -1658,7 +1630,7 @@ def _ercot_da_spp(today_str):
 
 
 def _pjm_da_hourly(today_str):
-    """Fetch PJM DA hourly LMP for Western Hub (pnode_id=51288), returns [HE, DA Price]."""
+
     pjm_headers = {
         'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
     }
@@ -1691,11 +1663,7 @@ def _pjm_da_hourly(today_str):
 
 
 def _bd_fetch_today_rt(iso, today_str):
-    """Fetch RT prices from native ISO APIs (called only on Refresh button click).
-    ERCOT: np6-788-cd SCED LMP 5-min data for HB_NORTH, averaged to hourly.
-    PJM: rt_unverified_fivemin_lmps 5-min data for Western Hub (pnode 51288), averaged to hourly.
-    Both use the fastest/unverified feeds for latest intraday prices.
-    """
+
     if iso == "ERCOT":
         return _ercot_rt_spp(today_str)
     else:
@@ -1703,9 +1671,7 @@ def _bd_fetch_today_rt(iso, today_str):
 
 
 def _ercot_rt_spp(today_str):
-    """Fetch ERCOT 5-min SCED LMPs for HB_NORTH (np6-788-cd), average to hourly.
-    Uses SCEDTimestampFrom/To. Price column = LMP. Hour derived from SCEDTimestamp.
-    """
+
     auths = ercot_token()
     if not auths:
         return None
@@ -1751,7 +1717,7 @@ def _ercot_rt_spp(today_str):
         if price_col is None:
             return None
         df[price_col] = pd.to_numeric(df[price_col], errors='coerce')
-        # Derive hour from SCEDTimestamp (confirmed from test)
+        
         if 'SCEDTimestamp' in df.columns:
             df['_ts'] = pd.to_datetime(df['SCEDTimestamp'], errors='coerce')
             df['HE'] = df['_ts'].dt.hour + 1
@@ -1769,9 +1735,7 @@ def _ercot_rt_spp(today_str):
 
 
 def _pjm_rt_5min(today_str):
-    """Fetch PJM unverified 5-min RT LMP for Western Hub (pnode_id=51288), average to hourly.
-    Uses rt_unverified_fivemin_lmps — posts within minutes, fastest available.
-    """
+
     pjm_headers = {
         'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
     }
@@ -1857,7 +1821,7 @@ def _bd_chunk_dates(date_list, chunk_size=BALDAY_CHUNK):
 
 
 def _bd_backfill_parquet(iso, parquet_path):
-    # Seed from gist/repo on cold start
+
     _bd_seed_parquet(iso)
 
     yesterday = datetime.now(CPT_BD).date() - timedelta(days=1)
@@ -1866,7 +1830,7 @@ def _bd_backfill_parquet(iso, parquet_path):
     if not missing:
         return existing
 
-    # Safety cap: if more than 14 days missing, seed failed -- only fetch last 14
+   
     if len(missing) > 14:
         cutoff = (yesterday - timedelta(days=13)).strftime('%Y-%m-%d')
         missing = [d for d in missing if d >= cutoff]
@@ -1884,7 +1848,7 @@ def _bd_backfill_parquet(iso, parquet_path):
         new_data = pd.concat(new_frames, ignore_index=True)
         existing = pd.concat([existing, new_data], ignore_index=True) if not existing.empty else new_data
         _bd_save_parquet(existing, parquet_path)
-        # Upload updated parquet to gist for persistence across server recycles
+        
         gist_file = _GIST_ERCOT_FILE if iso == "ERCOT" else _GIST_PJM_FILE
         _bd_gist_upload(existing, gist_file)
     return _bd_load_parquet(parquet_path)
@@ -2041,7 +2005,7 @@ def render_balday_tab(now_ct=None):
         today_str = now_ept.strftime('%Y-%m-%d')
         current_he = now_ept.hour + 1
 
-    # Session state keys for accumulated RT data
+    
     rt_key = f"balday_rt_{iso_choice}_{today_str}"
     rt_ts_key = f"balday_rt_ts_{iso_choice}_{today_str}"
 
@@ -2066,13 +2030,13 @@ def render_balday_tab(now_ct=None):
         last_rt_update = st.session_state.get(rt_ts_key, "Not yet refreshed")
         st.caption(f"RT last updated: {last_rt_update}")
 
-    # DA: cached for the day (retries each load if not yet available)
+   
     da_df = None
     try:
         da_df = _bd_fetch_today_da(iso_choice, today_str)
     except ValueError:
         pass  # DA not available yet
-    # RT: read from session state (no API call unless button pressed)
+    
     rt_df = st.session_state.get(rt_key)
 
     if da_df is None or da_df.empty:
@@ -2207,7 +2171,7 @@ def render_balday_tab(now_ct=None):
             unsafe_allow_html=True)
 
 
-# ==============================================================================
+
 
 
 def main():
@@ -2678,7 +2642,7 @@ def main():
                             else:
                                 st.markdown("<div style='text-align: center; padding: 5px 3px; font-size: 12px;'>N/A</div>", unsafe_allow_html=True)
 
-                # Popup Dialog for ERCOT date
+               
                 if 'ercot_popup_date' in st.session_state:
                     @st.dialog("Load Details", width="large")
                     def show_ercot_dialog():
