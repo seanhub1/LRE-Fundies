@@ -191,7 +191,7 @@ def fetch_outage_data_robust(url, headers, max_retries=3):
             continue
     return {}
 
-# PJM API Functions
+
 def pjm_api_call(url, max_retries=3):
     pjm_headers = {
         'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
@@ -252,7 +252,7 @@ def fetch_pjm_outages(cache_time):
 
 @st.cache_data(ttl=3600)
 def fetch_ercot_wind_by_region(cache_time):
-    """Fetch ERCOT wind forecast by region"""
+    
     auths = ercot_token()
     if not auths:
         return None, None
@@ -422,7 +422,7 @@ def fetch_outage_data(cache_time):
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour - Gist only updates at HE17 and HE01
 def load_historical_cache():
-    """Load snapshots from GitHub Gist"""
+    
     try:
         gist_url = st.secrets.get("gist", {}).get("snapshot_url")
         if gist_url:
@@ -434,7 +434,7 @@ def load_historical_cache():
     except Exception as e:
         pass  # Silently fail, return None
     
-    # Fallback to local file (for local development)
+    
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, 'r') as f:
@@ -454,7 +454,7 @@ def save_historical_cache(cache_data):
         return False
 
 def upload_to_gist(cache_data):
-    """Upload snapshot data to GitHub Gist"""
+    
     try:
         gist_token = st.secrets.get("gist", {}).get("token")
         gist_id = st.secrets.get("gist", {}).get("id")
@@ -632,7 +632,7 @@ def create_snapshot_data(met_load_df, met_wind_df, met_solar_df, df, outage_df,
 
 def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, outage_df,
                                    pjm_met_load_df, pjm_met_wind_df, pjm_met_solar_df, pjm_load_df, pjm_outage_df):
-    """Load snapshots from Gist, capture new ones if in window, and format for display"""
+    
     cache = load_historical_cache()
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo('America/Chicago'))
@@ -648,7 +648,7 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
     # Check snapshot
     snapshot_captured = False
     
-    # HE17 window: 4-6 PM CT (hour 16-17)
+   
     if 16 <= current_hour <= 17:
         he17_captured_date = cache.get('HE17_snapshot', {}).get('captured_date')
         session_key = f"he17_captured_{today}"
@@ -693,7 +693,7 @@ def get_or_update_historical_cache(met_load_df, met_wind_df, met_solar_df, df, o
         # Also save locally as backup
         save_historical_cache(cache)
 
-    # Handle both HE1_snapshot or HE01_snapshot
+    
     he01_data = cache.get('HE01_snapshot') or cache.get('HE1_snapshot') or {'captured_date': None, 'data': {}}
     he17_data = cache.get('HE17_snapshot') or {'captured_date': None, 'data': {}}
 
@@ -810,7 +810,7 @@ def check_password():
                     st.error("Wrong password")
         st.stop()
 
-# ── News RSS Functions ──
+
 NEWS_CATEGORIES = {
     "ERCOT": {
         "color": "#22c55e",
@@ -891,8 +891,8 @@ NEWS_CATEGORIES = {
     },
 }
 
-# ── X / Twitter Feeds via Nitter RSS ──
-# These accounts post real-time operational power/gas market updates
+
+
 X_FEEDS = {
     "ERCOT_ISO": {
         "category": "ERCOT",
@@ -926,7 +926,7 @@ X_FEEDS = {
     },
 }
 
-# Nitter instances to try (public, may rotate)
+
 NITTER_INSTANCES = [
     "https://nitter.privacydev.net",
     "https://nitter.poast.org",
@@ -934,8 +934,8 @@ NITTER_INSTANCES = [
     "https://nitter.perennialte.ch",
 ]
 
-# ── Relevance Filtering ──
-# Whitelist: article MUST contain at least one of these to pass.
+
+
 RELEVANCE_KEYWORDS = {
     # ISOs / RTOs
     "ercot", "pjm", "caiso", "miso", "spp", "nyiso", "isone",
@@ -974,7 +974,7 @@ RELEVANCE_KEYWORDS = {
     "heat rate", "capacity auction", "capacity market",
 }
 
-# Sources that are financial noise
+
 EXCLUDE_SOURCES = {
     "the motley fool", "motley fool",
     "seeking alpha", "seekingalpha",
@@ -991,7 +991,7 @@ EXCLUDE_SOURCES = {
 
 @st.cache_data(ttl=1800)
 def fetch_google_rss_news(query, category, _cache_time):
-    """Fetch news from Google News RSS for a given query."""
+
     articles = []
     try:
         rss_url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
@@ -1024,12 +1024,12 @@ def fetch_google_rss_news(query, category, _cache_time):
 
 @st.cache_data(ttl=1800)
 def fetch_x_feed(username, feed_config, _cache_time):
-    """Fetch recent posts from an X/Twitter account via Nitter RSS or Google search fallback."""
+
     articles = []
     category = feed_config["category"]
     display_name = feed_config["display_name"]
 
-    # Method 1: Try Nitter RSS instances
+    
     for nitter_base in NITTER_INSTANCES:
         try:
             rss_url = f"{nitter_base}/{username}/rss"
@@ -1048,7 +1048,7 @@ def fetch_x_feed(username, feed_config, _cache_time):
                         # Clean up nitter links to point to x.com
                         if link and nitter_base in link:
                             link = link.replace(nitter_base, "https://x.com")
-                        # Truncate long tweets for headline display
+                        
                         if len(title) > 200:
                             title = title[:197] + "..."
                         if title and title.strip() != "":
@@ -1065,7 +1065,7 @@ def fetch_x_feed(username, feed_config, _cache_time):
         except Exception:
             continue
 
-    # Method 2: Fallback - Google News search for the account's posts
+
     if not articles:
         try:
             query = f"from:{username} site:x.com when:3d"
@@ -1097,7 +1097,7 @@ def fetch_x_feed(username, feed_config, _cache_time):
     return articles
 
 def parse_rss_date(date_str):
-    """Parse RSS pubDate string to datetime."""
+
     try:
         from email.utils import parsedate_to_datetime
         return parsedate_to_datetime(date_str)
@@ -1105,7 +1105,7 @@ def parse_rss_date(date_str):
         return datetime.min.replace(tzinfo=None)
 
 def format_relative_time(dt):
-    """Format a datetime as relative time string."""
+
     try:
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo('UTC'))
@@ -1129,7 +1129,7 @@ def format_relative_time(dt):
 
 @st.cache_data(ttl=1800)
 def fetch_all_news(cache_time):
-    """Fetch all news across all categories plus X feeds."""
+
     all_articles = []
     seen_headlines = set()
 
@@ -1154,7 +1154,7 @@ def fetch_all_news(cache_time):
                 x_articles.append(post)
     all_articles.extend(x_articles)
 
-    # Hard filter: drop articles older than 3 days
+    
     from zoneinfo import ZoneInfo
     cutoff = datetime.now(ZoneInfo('UTC')) - timedelta(days=3)
     all_articles = [
@@ -1162,19 +1162,18 @@ def fetch_all_news(cache_time):
         if parse_rss_date(a.get("pubDate", "")) >= cutoff
     ]
 
-    # Filter: whitelist relevance + source exclusion
-    # X posts from trusted accounts skip the whitelist (they're already curated)
+
     def is_relevant(article):
-        # Trusted X accounts always pass
+        
         if article.get("is_x_post", False):
             return True
         text = (article.get("headline", "") + " " + article.get("source", "")).lower()
-        # Hard exclude: financial noise sources
+        
         source_lower = article.get("source", "").lower().strip()
         for exc_source in EXCLUDE_SOURCES:
             if exc_source in source_lower:
                 return False
-        # Whitelist: headline MUST contain at least one relevant keyword
+        
         for kw in RELEVANCE_KEYWORDS:
             if kw in text:
                 return True
@@ -1185,7 +1184,7 @@ def fetch_all_news(cache_time):
     all_articles.sort(key=lambda x: parse_rss_date(x.get("pubDate", "")), reverse=True)
     return all_articles
 
-# ── ERCOT Reserve Margin Functions ──
+
 ALL_HOURS = [f'HE{h:02}' for h in range(1, 25)]
 
 def prep_interval(df_in, col='Interval Start'):
@@ -1255,7 +1254,7 @@ def add_now_line_ts(fig, now_dt):
     )
 
 def _get_ercot_json(url):
-    """Fetch JSON from ERCOT, bypassing Cloudflare."""
+
     errors = []
 
     try:
@@ -1374,9 +1373,7 @@ def fetch_reserve_data(cache_time):
 
 
 
-# ==============================================================================
-#  BAL-DAY CALCULATOR
-# ==============================================================================
+
 
 _balday_logger = logging.getLogger(__name__)
 
@@ -1393,7 +1390,7 @@ ERCOT_PARQUET = _WORK_DIR / "ercot_dart.parquet"
 PJM_PARQUET   = _WORK_DIR / "pjm_dart.parquet"
 
 def _find_repo_parquet(filename):
-    """Search for a parquet file in all possible repo locations."""
+
     candidates = [
         Path(os.path.dirname(os.path.abspath(__file__))) / "balday_cache" / filename,
         Path.cwd() / "balday_cache" / filename,
@@ -1406,7 +1403,7 @@ def _find_repo_parquet(filename):
     for c in candidates:
         if c.exists():
             return c
-    # Also try glob as last resort
+   
     for parent in [Path("/mount/src"), Path("/app"), Path("/home/appuser")]:
         if parent.exists():
             matches = list(parent.rglob(f"balday_cache/{filename}"))
@@ -1414,7 +1411,7 @@ def _find_repo_parquet(filename):
                 return matches[0]
     return None
 
-# Seed on module load - copy repo parquets to /tmp once
+
 import shutil
 for _fname, _dst in [("ercot_dart.parquet", ERCOT_PARQUET), ("pjm_dart.parquet", PJM_PARQUET)]:
     if not _dst.exists():
@@ -1430,7 +1427,7 @@ BALDAY_SLEEP     = 1.5
 YES_ERCOT_NODE = 'HB_NORTH'
 YES_PJM_NODE   = 'WESTERN HUB'
 
-# Gist filenames for balday parquet persistence
+# Gist filenames for balday 
 _GIST_ERCOT_FILE = "balday_ercot_dart.b64"
 _GIST_PJM_FILE   = "balday_pjm_dart.b64"
 
