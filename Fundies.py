@@ -1424,9 +1424,6 @@ BALDAY_CHUNK     = 7
 BALDAY_SLEEP     = 1.5
 
 
-YES_ERCOT_NODE = 'HB_NORTH'
-YES_PJM_NODE   = 'WESTERN HUB'
-
 # Gist filenames for balday 
 _GIST_ERCOT_FILE = "balday_ercot_dart.b64"
 _GIST_PJM_FILE   = "balday_pjm_dart.b64"
@@ -1499,50 +1496,213 @@ def _bd_seed_parquet(iso):
         shutil.copy2(src, work_path)
 
 
-def _yes_fetch(url, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            r = requests.get(url, auth=YES_AUTH, timeout=30)
-            r.raise_for_status()
-            df = pd.read_html(StringIO(r.text))[0]
-            if 'error' in df.columns or len(df.columns) == 1:
-                time.sleep(5 * (attempt + 1))
-                continue
-            return df
-        except Exception:
-            if attempt < max_retries - 1:
-                time.sleep(5 * (attempt + 1))
-    return None
-
-
-
-
-
-def _yes_hist_dart(node, start_date, end_date):
-    da_url = (f"{YES_BASE}/timeseries/DALMP/{node}"
-              f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
-    rt_url = (f"{YES_BASE}/timeseries/RTLMP/{node}"
-              f"?agglevel=HOUR&startdate={start_date}&enddate={end_date}")
-    da_df = _yes_fetch(da_url)
-    rt_df = _yes_fetch(rt_url)
-    if da_df is None or da_df.empty:
+def _ercot_hist_dart(start_date, end_date):
+    """Fetch historical DA and RT prices for HB_NORTH from ERCOT API."""
+    auths = ercot_token()
+    if not auths:
         return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
-    da_df = da_df[['MARKETDAY', 'HOURENDING', 'AVGVALUE']].copy()
-    da_df.columns = ['date', 'HE', 'DA']
-    da_df['date'] = pd.to_datetime(da_df['date']).dt.strftime('%Y-%m-%d')
-    da_df['HE'] = pd.to_numeric(da_df['HE'], errors='coerce').astype(int)
-    da_df['DA'] = pd.to_numeric(da_df['DA'], errors='coerce')
-    if rt_df is None or rt_df.empty:
-        da_df['RT'] = np.nan
-        return da_df
-    rt_df = rt_df[['MARKETDAY', 'HOURENDING', 'AVGVALUE']].copy()
-    rt_df.columns = ['date', 'HE', 'RT']
-    rt_df['date'] = pd.to_datetime(rt_df['date']).dt.strftime('%Y-%m-%d')
-    rt_df['HE'] = pd.to_numeric(rt_df['HE'], errors='coerce').astype(int)
-    rt_df['RT'] = pd.to_numeric(rt_df['RT'], errors='coerce')
-    rt_df = rt_df.groupby(['date', 'HE'])['RT'].mean().reset_index()
-    merged = da_df.merge(rt_df, on=['date', 'HE'], how='left')
+
+    # --- DA prices (np4-190-cd) ---
+    da_frames = []
+    try:
+        page = 1
+        while True:
+            da_url = (
+                f"https://api.ercot.com/api/public-reports/np4-190-cd/dam_stlmnt_pnt_prices"
+                f"?deliveryDateFrom={start_date}&deliveryDateTo={end_date}"
+                f"&settlementPoint=HB_NORTH&page={page}&size=1000"
+            )
+            resp = requests.get(da_url, headers=auths, timeout=60)
+            if not resp.ok:
+                break
+            result = resp.json()
+            rows = result.get("data", [])
+            if not rows:
+                break
+            fields = [f['name'] for f in result.get("fields", [])]
+            da_frames.append(pd.DataFrame(rows, columns=fields))
+            if page >= result.get("_meta", {}).get("totalPages", 1):
+                break
+            page += 1
+    except Exception:
+        pass
+
+    if not da_frames:
+        return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
+
+    da_df = pd.concat(da_frames, ignore_index=True)
+
+    # Find price and hour columns
+    price_col = next((c for c in ['settlementPointPrice', 'SPP', 'DASpp'] if c in da_df.columns),
+                     next((c for c in da_df.columns if 'price' in c.lower() or 'spp' in c.lower()), None))
+    hour_col = next((c for c in ['deliveryHour', 'hourEnding'] if c in da_df.columns), None)
+    if price_col is None or hour_col is None:
+        return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
+
+    if da_df[hour_col].dtype == 'object' and da_df[hour_col].str.contains(':').any():
+        da_df['HE'] = da_df[hour_col].str.split(':').str[0].astype(int)
+    else:
+        da_df['HE'] = pd.to_numeric(da_df[hour_col], errors='coerce')
+    da_df['DA'] = pd.to_numeric(da_df[price_col], errors='coerce')
+    da_df['date'] = pd.to_datetime(da_df['deliveryDate']).dt.strftime('%Y-%m-%d')
+    da_df = da_df.dropna(subset=['HE', 'DA'])
+    da_df['HE'] = da_df['HE'].astype(int)
+    da_hourly = da_df.groupby(['date', 'HE'])['DA'].mean().reset_index()
+
+    # --- RT prices (np6-788-cd) ---
+    rt_frames = []
+    try:
+        page = 1
+        while True:
+            rt_url = (
+                f"https://api.ercot.com/api/public-reports/np6-788-cd/lmp_node_zone_hub"
+                f"?SCEDTimestampFrom={start_date}T00:00:00&SCEDTimestampTo={end_date}T23:59:59"
+                f"&settlementPoint=HB_NORTH&page={page}&size=1000"
+            )
+            resp = requests.get(rt_url, headers=auths, timeout=60)
+            if not resp.ok:
+                break
+            result = resp.json()
+            rows = result.get("data", [])
+            if not rows:
+                break
+            fields = [f['name'] for f in result.get("fields", [])]
+            rt_frames.append(pd.DataFrame(rows, columns=fields))
+            if page >= result.get("_meta", {}).get("totalPages", 1):
+                break
+            page += 1
+            time.sleep(0.5)  # Rate limit courtesy
+    except Exception:
+        pass
+
+    if not rt_frames:
+        da_hourly['RT'] = np.nan
+        return da_hourly[['date', 'HE', 'DA', 'RT']]
+
+    rt_df = pd.concat(rt_frames, ignore_index=True)
+    rt_price_col = next((c for c in ['LMP', 'LMPValue', 'settlementPointPrice'] if c in rt_df.columns),
+                        next((c for c in rt_df.columns if 'lmp' in c.lower() or 'price' in c.lower()), None))
+    if rt_price_col is None:
+        da_hourly['RT'] = np.nan
+        return da_hourly[['date', 'HE', 'DA', 'RT']]
+
+    rt_df[rt_price_col] = pd.to_numeric(rt_df[rt_price_col], errors='coerce')
+    if 'SCEDTimestamp' in rt_df.columns:
+        rt_df['_ts'] = pd.to_datetime(rt_df['SCEDTimestamp'], errors='coerce')
+        rt_df['date'] = rt_df['_ts'].dt.strftime('%Y-%m-%d')
+        rt_df['HE'] = rt_df['_ts'].dt.hour + 1
+    elif 'deliveryDate' in rt_df.columns and 'deliveryHour' in rt_df.columns:
+        rt_df['date'] = pd.to_datetime(rt_df['deliveryDate']).dt.strftime('%Y-%m-%d')
+        rt_df['HE'] = pd.to_numeric(rt_df['deliveryHour'], errors='coerce')
+    else:
+        da_hourly['RT'] = np.nan
+        return da_hourly[['date', 'HE', 'DA', 'RT']]
+
+    rt_df = rt_df.dropna(subset=['HE', rt_price_col])
+    rt_df['HE'] = rt_df['HE'].astype(int)
+    rt_hourly = rt_df.groupby(['date', 'HE'])[rt_price_col].mean().reset_index()
+    rt_hourly.columns = ['date', 'HE', 'RT']
+
+    merged = da_hourly.merge(rt_hourly, on=['date', 'HE'], how='left')
     return merged[['date', 'HE', 'DA', 'RT']]
+
+
+def _pjm_hist_dart(start_date, end_date):
+    """Fetch historical DA and RT prices for WESTERN HUB (pnode_id=51288) from PJM API."""
+    pjm_headers = {
+        'Ocp-Apim-Subscription-Key': st.secrets["pjm"]["subscription_key"],
+    }
+
+    # --- DA prices ---
+    da_frames = []
+    try:
+        start_row = 1
+        while True:
+            da_url = (
+                f"https://api.pjm.com/api/v1/da_hrl_lmps"
+                f"?download=true&rowCount=50000"
+                f"&sort=datetime_beginning_ept&order=Asc&startRow={start_row}"
+                f"&datetime_beginning_ept={start_date}%2000:00to{end_date}%2023:59"
+                f"&pnode_id=51288"
+                f"&fields=datetime_beginning_ept,total_lmp_da,pnode_id"
+            )
+            resp = requests.get(da_url, headers=pjm_headers, timeout=120)
+            if not resp.ok:
+                break
+            data = resp.json()
+            if not data:
+                break
+            chunk = pd.json_normalize(data)
+            if chunk.empty:
+                break
+            da_frames.append(chunk)
+            if len(chunk) < 50000:
+                break
+            start_row += 50000
+    except Exception:
+        pass
+
+    if not da_frames:
+        return pd.DataFrame(columns=['date', 'HE', 'DA', 'RT'])
+
+    da_df = pd.concat(da_frames, ignore_index=True)
+    da_df['datetime_beginning_ept'] = pd.to_datetime(da_df['datetime_beginning_ept'])
+    da_df['date'] = da_df['datetime_beginning_ept'].dt.strftime('%Y-%m-%d')
+    da_df['HE'] = da_df['datetime_beginning_ept'].dt.hour + 1
+    da_df['DA'] = pd.to_numeric(da_df['total_lmp_da'], errors='coerce')
+    da_hourly = da_df.groupby(['date', 'HE'])['DA'].mean().reset_index()
+
+    # --- RT prices ---
+    rt_frames = []
+    try:
+        date_filter = f"{start_date} 00:00 to {end_date} 23:59"
+        start_row = 1
+        while True:
+            rt_url = (
+                f"https://api.pjm.com/api/v1/rt_unverified_fivemin_lmps"
+                f"?download=true&rowCount=50000"
+                f"&sort=datetime_beginning_ept&order=Asc&startRow={start_row}"
+                f"&datetime_beginning_ept={quote(date_filter)}"
+                f"&pnode_id=51288"
+                f"&fields=datetime_beginning_ept,total_lmp_rt,pnode_id"
+            )
+            resp = requests.get(rt_url, headers=pjm_headers, timeout=120)
+            if not resp.ok:
+                break
+            data = resp.json()
+            if not data:
+                break
+            chunk = pd.json_normalize(data)
+            if chunk.empty:
+                break
+            rt_frames.append(chunk)
+            if len(chunk) < 50000:
+                break
+            start_row += 50000
+    except Exception:
+        pass
+
+    if not rt_frames:
+        da_hourly['RT'] = np.nan
+        return da_hourly[['date', 'HE', 'DA', 'RT']]
+
+    rt_df = pd.concat(rt_frames, ignore_index=True)
+    rt_df['datetime_beginning_ept'] = pd.to_datetime(rt_df['datetime_beginning_ept'])
+    rt_df['date'] = rt_df['datetime_beginning_ept'].dt.strftime('%Y-%m-%d')
+    rt_df['HE'] = rt_df['datetime_beginning_ept'].dt.hour + 1
+    rt_df['RT'] = pd.to_numeric(rt_df['total_lmp_rt'], errors='coerce')
+    rt_hourly = rt_df.groupby(['date', 'HE'])['RT'].mean().reset_index()
+
+    merged = da_hourly.merge(rt_hourly, on=['date', 'HE'], how='left')
+    return merged[['date', 'HE', 'DA', 'RT']]
+
+
+def _hist_dart(iso, start_date, end_date):
+    """Router: fetch historical DART from the appropriate ISO API."""
+    if iso == "ERCOT":
+        return _ercot_hist_dart(start_date, end_date)
+    else:
+        return _pjm_hist_dart(start_date, end_date)
 
 
 @st.cache_data(ttl=86400)
@@ -1833,10 +1993,9 @@ def _bd_backfill_parquet(iso, parquet_path):
         missing = [d for d in missing if d >= cutoff]
 
     chunks = _bd_chunk_dates(missing, BALDAY_CHUNK)
-    node = YES_ERCOT_NODE if iso == "ERCOT" else YES_PJM_NODE
     new_frames = []
     for i, (cs, ce) in enumerate(chunks):
-        chunk_df = _yes_hist_dart(node, cs, ce)
+        chunk_df = _hist_dart(iso, cs, ce)
         if not chunk_df.empty:
             new_frames.append(chunk_df)
         if i < len(chunks) - 1:
